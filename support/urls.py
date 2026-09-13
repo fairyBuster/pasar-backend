@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     SupportLinkViewSet,
+    SupportFaqViewSet,
     UserChatMessagesView,
     UserChatSendView,
     AdminChatReplyView,
@@ -11,6 +12,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register(r'links', SupportLinkViewSet, basename='support-links')
+router.register(r'faqs', SupportFaqViewSet, basename='support-faqs')
 
 app_name = 'support'
 

@@ -86,6 +86,9 @@ class TransactionSerializer(serializers.ModelSerializer):
     withdrawal_service_fee_fixed = serializers.SerializerMethodField()
     voucher = serializers.SerializerMethodField()
     investment_status = serializers.SerializerMethodField()
+    withdrawal_id = serializers.SerializerMethodField()
+    withdrawal_fee = serializers.SerializerMethodField()
+    withdrawal_net_amount = serializers.SerializerMethodField()
     
     class Meta:
         model = Transaction
@@ -261,6 +264,33 @@ class TransactionSerializer(serializers.ModelSerializer):
             service = getattr(wd, 'withdrawal_service', None) if wd else None
             if service:
                 return str(service.fee_fixed)
+        except Exception:
+            pass
+        return None
+
+    def get_withdrawal_id(self, obj):
+        try:
+            wd = self._get_withdrawal(obj)
+            if wd:
+                return wd.pk
+        except Exception:
+            pass
+        return None
+
+    def get_withdrawal_fee(self, obj):
+        try:
+            wd = self._get_withdrawal(obj)
+            if wd:
+                return str(wd.fee)
+        except Exception:
+            pass
+        return None
+
+    def get_withdrawal_net_amount(self, obj):
+        try:
+            wd = self._get_withdrawal(obj)
+            if wd:
+                return str(wd.net_amount)
         except Exception:
             pass
         return None

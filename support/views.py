@@ -10,7 +10,7 @@ from django.utils import timezone
 import json
 import time
 
-from .models import SupportLink, SupportChatThread, SupportChatMessage
+from .models import SupportLink, SupportChatThread, SupportChatMessage, SupportFaq
 from .serializers import (
     SupportLinkSerializer,
     SupportLinkListResponseSerializer,
@@ -18,6 +18,7 @@ from .serializers import (
     SupportChatMessageCreateSerializer,
     SupportChatAdminReplySerializer,
     SupportChatThreadSerializer,
+    SupportFaqSerializer,
 )
 
 USER_TAG = "User API"
@@ -66,6 +67,33 @@ class SupportLinkViewSet(viewsets.ModelViewSet):
         if isinstance(response.data, dict):
             response.data['root_parent_phone'] = root_phone
         return response
+
+
+@extend_schema_view(
+    list=extend_schema(tags=[USER_TAG], responses={200: SupportFaqSerializer(many=True)}),
+    retrieve=extend_schema(tags=[USER_TAG]),
+    create=extend_schema(tags=[ADMIN_TAG]),
+    update=extend_schema(tags=[ADMIN_TAG]),
+    partial_update=extend_schema(tags=[ADMIN_TAG]),
+    destroy=extend_schema(tags=[ADMIN_TAG]),
+)
+class SupportFaqViewSet(viewsets.ModelViewSet):
+    """FAQ — publik buat dibaca, admin buat nulis. Diisi dari Django admin."""
+
+    serializer_class = SupportFaqSerializer
+    pagination_class = None
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [AllowAny()]
+        return [IsAdminUser()]
+
+    def get_queryset(self):
+        qs = SupportFaq.objects.all()
+        user = getattr(self.request, 'user', None)
+        if not user or not getattr(user, 'is_staff', False):
+            return qs.filter(is_active=True)
+        return qs
 
 
 class UserChatMessagesView(APIView):

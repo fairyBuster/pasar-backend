@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import SupportLink, SupportChatThread, SupportChatMessage
+from .models import SupportLink, SupportChatThread, SupportChatMessage, SupportFaq
 
 
 class SupportLinkSerializer(serializers.ModelSerializer):
@@ -87,3 +87,10 @@ class SupportChatThreadSerializer(serializers.ModelSerializer):
     def get_last_message(self, obj):
         msg = obj.messages.order_by('-id').first()
         return SupportChatMessageSerializer(msg).data if msg else None
+
+
+class SupportFaqSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SupportFaq
+        fields = ['id', 'category', 'question', 'answer', 'order', 'is_active', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']

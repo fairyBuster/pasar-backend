@@ -56,6 +56,11 @@ class Bank(models.Model):
         ("PHP", "PHP (Philippine Peso)"),
     ]
 
+    CATEGORY_CHOICES = [
+        ("BANK", "Bank"),
+        ("EWALLET", "E-Wallet"),
+    ]
+
     code = models.CharField(max_length=50, unique=True)
     name = models.CharField(max_length=100)
     currency_code = models.CharField(
@@ -63,6 +68,12 @@ class Bank(models.Model):
         choices=CURRENCY_CHOICES,
         default="IDR",
         help_text="Kategori currency untuk bank ini (mis. bank IDR vs bank USD).",
+    )
+    category = models.CharField(
+        max_length=10,
+        choices=CATEGORY_CHOICES,
+        default="BANK",
+        help_text="Kategori untuk memisahkan rekening bank dan e-wallet.",
     )
     is_active = models.BooleanField(default=True)
     logo = models.URLField(blank=True, null=True)

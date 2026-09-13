@@ -1136,20 +1136,23 @@ class AccountInfoView(APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class ProfileUpdateView(APIView):
     """
-    Update user profile - full_name, username, and telegram
+    Update user profile - full_name, username, telegram, email, date_of_birth, and gender
     """
     permission_classes = (IsAuthenticated,)
     serializer_class = ProfileUpdateSerializer
 
     @extend_schema(
-        description='Update user profile (full_name, username, and telegram)',
+        description='Update user profile (full_name, username, telegram, email, date_of_birth, gender)',
         request={
             'application/json': {
                 'type': 'object',
                 'properties': {
                     'full_name': {'type': 'string', 'description': 'Full name of the user'},
                     'username': {'type': 'string', 'description': 'Username (must be unique)'},
-                    'telegram': {'type': 'string', 'description': 'Telegram username or contact'}
+                    'telegram': {'type': 'string', 'description': 'Telegram username or contact'},
+                    'email': {'type': 'string', 'description': 'Email (must be unique)'},
+                    'date_of_birth': {'type': 'string', 'format': 'date', 'description': 'Tanggal lahir (YYYY-MM-DD)'},
+                    'gender': {'type': 'string', 'enum': ['male', 'female'], 'description': 'Jenis kelamin: male / female'}
                 }
             }
         },
@@ -1162,7 +1165,10 @@ class ProfileUpdateView(APIView):
                         value={
                             'full_name': 'Updated Full Name',
                             'username': 'updated_username',
-                            'telegram': '@updated_telegram'
+                            'telegram': '@updated_telegram',
+                            'email': 'user@example.com',
+                            'date_of_birth': '1995-08-17',
+                            'gender': 'male'
                         }
                     )
                 ]
@@ -2974,6 +2980,126 @@ class EmailTokenObtainPairView(TokenObtainPairView):
         responses={
             200: OpenApiResponse(description="Login sukses, kembalikan access dan refresh token"),
             401: OpenApiResponse(description="Login gagal"),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data, context={'request': request})
+        try:
+            serializer.is_valid(raise_exception=True)
+        except AuthenticationFailed as e:
+            return Response({"detail": str(e)}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response(serializer.validated_data, status=status.HTTP_200_OK)
+
+
+class IdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Login dengan satu field `identifier` yang bisa berisi nomor phone atau email.
+    - Mengandung '@' -> dicari via email (case-insensitive)
+    - Selain itu     -> dinormalisasi sebagai phone (normalize_phone)
+    """
+    identifier = serializers.CharField(write_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Parent menambahkan field USERNAME_FIELD (`phone`) sebagai field wajib;
+        # endpoint ini memakai `identifier`, jadi field itu dihapus.
+        self.fields.pop(self.username_field, None)
+
+    def validate(self, attrs):
+        identifier = (attrs.get('identifier') or '').strip()
+        password = attrs.get('password')
+        if not identifier or not password:
+            raise AuthenticationFailed('Please provide both identifier and password')
+
+        request = self.context.get('request')
+        if '@' in identifier:
+            try:
+                user = User.objects.get(email__iexact=identifier)
+            except User.DoesNotExist:
+                raise AuthenticationFailed('Invalid phone/email or password')
+            if not user.check_password(password):
+                raise AuthenticationFailed('Invalid phone/email or password')
+        else:
+            phone = normalize_phone(identifier)
+            user = authenticate(request=request, username=phone, password=password) if phone else None
+            if not user:
+                raise AuthenticationFailed('Invalid phone/email or password')
+
+        enforce_user_access(user)
+        ip = _get_request_ip(request) if request is not None else None
+        if ip:
+            user.last_login_ip = ip
+            user.save(update_fields=['last_login_ip'])
+        self.user = user
+        try:
+            refresh = self.get_token(user)
+        except IntegrityError as e:
+            if "token_blacklist_outstandingtoken_pkey" in str(e):
+                _sync_jwt_blacklist_sequences()
+                refresh = self.get_token(user)
+            else:
+                raise
+        return {
+            'refresh': str(refresh),
+            'access': str(refresh.access_token),
+            'user': UserSerializer(user).data,
+        }
+
+
+class IdentifierTokenObtainPairView(TokenObtainPairView):
+    permission_classes = (AllowAny,)
+    throttle_classes = api_settings.DEFAULT_THROTTLE_CLASSES
+    throttle_scope = 'auth_login'
+    serializer_class = IdentifierTokenObtainPairSerializer
+
+    @extend_schema(
+        summary="Login dengan phone atau email + password (JWT)",
+        description=(
+            "Kirim `identifier` yang bisa berisi nomor telepon atau email. "
+            "Nilai yang mengandung '@' diproses sebagai email, selain itu diproses sebagai phone."
+        ),
+        tags=[USER_TAG],
+        request={
+            'application/json': {
+                'type': 'object',
+                'properties': {
+                    'identifier': {'type': 'string', 'description': 'Nomor telepon atau email'},
+                    'password': {'type': 'string', 'format': 'password'},
+                },
+                'required': ['identifier', 'password'],
+            }
+        },
+        responses={
+            200: OpenApiResponse(
+                description="Login sukses, kembalikan access dan refresh token",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        value={
+                            "access": "<jwt_access>",
+                            "refresh": "<jwt_refresh>",
+                            "user": {
+                                "id": 1,
+                                "phone": "085112345678",
+                                "email": "user@example.com",
+                                "full_name": "User Name",
+                                "balance": "0.00",
+                                "balance_deposit": "0.00",
+                                "referral_code": "ABC123",
+                            },
+                        },
+                    ),
+                ],
+            ),
+            401: OpenApiResponse(
+                description="Login gagal",
+                examples=[
+                    OpenApiExample(
+                        'Error',
+                        value={"detail": "Invalid phone/email or password"},
+                    ),
+                ],
+            ),
         },
     )
     def post(self, request, *args, **kwargs):

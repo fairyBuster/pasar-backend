@@ -471,17 +471,30 @@ class AccountStatsSerializer(serializers.ModelSerializer):
         ]
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating user profile - full_name, username, and telegram"""
+    """Serializer for updating user profile - full_name, username, telegram, email, date_of_birth, and gender"""
     
     class Meta:
         model = User
-        fields = ('full_name', 'username', 'telegram')
+        fields = ('full_name', 'username', 'telegram', 'email', 'date_of_birth', 'gender')
     
     def validate_username(self, value):
         """Validate that username is unique (excluding current user)"""
         user = self.instance
         if User.objects.filter(username=value).exclude(id=user.id).exists():
             raise serializers.ValidationError("Username sudah digunakan oleh user lain.")
+        return value
+
+    def validate_email(self, value):
+        """Validate that email is unique (excluding current user)"""
+        user = self.instance
+        if User.objects.filter(email__iexact=value).exclude(id=user.id).exists():
+            raise serializers.ValidationError("Email sudah digunakan oleh user lain.")
+        return value
+
+    def validate_date_of_birth(self, value):
+        """Tanggal lahir tidak boleh di masa depan"""
+        if value and value > timezone.now().date():
+            raise serializers.ValidationError("Tanggal lahir tidak valid.")
         return value
 
 class WithdrawPinSerializer(serializers.Serializer):

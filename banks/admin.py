@@ -26,11 +26,12 @@ class BankSettingsAdmin(admin.ModelAdmin):
 @admin.register(Bank)
 class BankAdmin(admin.ModelAdmin):
     list_display = (
-        'id', 'code', 'name', 'currency_code', 'is_active', 'min_withdrawal', 'max_withdrawal',
+        'id', 'code', 'name', 'currency_code', 'category', 'is_active', 'min_withdrawal', 'max_withdrawal',
         'withdrawal_fee', 'withdrawal_fee_fixed', 'processing_time', 'created_at'
     )
     search_fields = ('code', 'name')
-    list_filter = ('currency_code', 'is_active',)
+    list_filter = ('category', 'currency_code', 'is_active',)
+    list_editable = ('category',)
     readonly_fields = ('created_at', 'updated_at')
 
 

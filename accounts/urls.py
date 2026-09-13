@@ -15,6 +15,7 @@ urlpatterns = [
     path('logout/', views.LogoutView.as_view(), name='logout'),
     path('jwt/phone-login/', views.PhoneTokenObtainPairView.as_view(), name='jwt_phone_login'),
     path('jwt/email-login/', views.EmailTokenObtainPairView.as_view(), name='jwt_email_login'),
+    path('jwt/identifier-login/', views.IdentifierTokenObtainPairView.as_view(), name='jwt_identifier_login'),
     path('jwt/logout/', views.JWTLogoutView.as_view(), name='jwt_logout'),
     path('reset-password/', views.ChangePasswordByPhoneView.as_view(), name='reset_password'),
     path('reset-password-otp/', views.ResetPasswordWithOTPView.as_view(), name='reset_password_otp'),

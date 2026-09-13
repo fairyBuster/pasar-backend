@@ -20,15 +20,24 @@ class BanksListView(APIView):
                 type=str,
                 required=False,
                 description="Filter kategori currency bank (IDR/USD/EUR/SGD/MYR)",
+            ),
+            OpenApiParameter(
+                name="category",
+                type=str,
+                required=False,
+                description="Filter kategori bank/e-wallet (BANK/EWALLET)",
             )
         ],
         responses={200: OpenApiResponse(response=BankSerializer(many=True))},
     )
     def get(self, request):
         currency_code = (request.query_params.get("currency_code") or "").strip().upper()
+        category = (request.query_params.get("category") or "").strip().upper()
         banks = Bank.objects.filter(is_active=True)
         if currency_code:
             banks = banks.filter(currency_code=currency_code)
+        if category:
+            banks = banks.filter(category=category)
         banks = banks.order_by('name')
         ser = BankSerializer(banks, many=True)
         return Response(ser.data)

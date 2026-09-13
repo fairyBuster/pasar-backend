@@ -76,3 +76,31 @@ class SupportChatMessage(models.Model):
 
     def __str__(self):
         return f"Msg(thread={self.thread_id}, sender={self.sender_type}, at={self.created_at})"
+
+
+class SupportFaq(models.Model):
+    """Pertanyaan umum (FAQ) — diisi lewat Django admin, dibaca halaman Pusat Bantuan."""
+
+    category = models.CharField(max_length=50, default='Akun')
+    question = models.CharField(max_length=255)
+    answer = models.TextField()
+    order = models.PositiveIntegerField(
+        default=0, help_text='Urutan tampil di app — angka kecil muncul duluan.'
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['category', 'order', 'id']
+        verbose_name = 'FAQ'
+        verbose_name_plural = 'FAQ'
+
+    def __str__(self):
+        return f"[{self.category}] {self.question}"
+
+    def save(self, *args, **kwargs):
+        from accounts.models import sanitize_user_text
+        self.question = sanitize_user_text(self.question or "")
+        self.answer = sanitize_user_text(self.answer or "")
+        super().save(*args, **kwargs)

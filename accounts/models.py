@@ -251,6 +251,12 @@ class GeneralSetting(models.Model):
         return [main]
 
 
+USER_GENDER_CHOICES = [
+    ('male', 'Male'),
+    ('female', 'Female'),
+]
+
+
 class User(AbstractUser):
     """Custom User model extending Django's AbstractUser."""
     
@@ -258,6 +264,8 @@ class User(AbstractUser):
     full_name = models.CharField(max_length=255, blank=True)
     phone = models.CharField(max_length=15, unique=True)
     telegram = models.CharField(max_length=255, blank=True, default='')
+    date_of_birth = models.DateField(blank=True, null=True)
+    gender = models.CharField(max_length=10, blank=True, default='', choices=USER_GENDER_CHOICES)
     avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
     balance = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     balance_deposit = models.DecimalField(max_digits=15, decimal_places=2, default=0)
