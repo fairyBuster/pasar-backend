@@ -32,6 +32,13 @@ from .views import (
     ReepayDepositInitiateView,
     ReepayDepositCallbackView,
     ReepayDepositSelectMethodView,
+    FfpayDepositInitiateView,
+    FfpayDepositSelectMethodView,
+    FfpayDepositCallbackView,
+    LpayDepositInitiateView,
+    MgmDepositInitiateView,
+    QuenPayDepositInitiateView,
+    QuenPayDepositCallbackView,
 )
 
 urlpatterns = [
@@ -67,5 +74,14 @@ urlpatterns = [
     path('reepay/initiate/', ReepayDepositInitiateView.as_view(), name='deposit-reepay-initiate'),
     path('reepay/select-method/', ReepayDepositSelectMethodView.as_view(), name='deposit-reepay-select-method'),
     path('reepay/callback/', ReepayDepositCallbackView.as_view(), name='deposit-reepay-callback'),
+    path('ffpay/initiate/', FfpayDepositInitiateView.as_view(), name='deposit-ffpay-initiate'),
+    path('ffpay/select-method/', FfpayDepositSelectMethodView.as_view(), name='deposit-ffpay-select-method'),
+    path('ffpay/callback/', FfpayDepositCallbackView.as_view(), name='deposit-ffpay-callback'),
+    path('lpay/initiate/', LpayDepositInitiateView.as_view(), name='deposit-lpay-initiate'),
+    path('lpay/callback/', FfpayDepositCallbackView.as_view(), name='deposit-lpay-callback'),
+    path('mgm/initiate/', MgmDepositInitiateView.as_view(), name='deposit-mgm-initiate'),
+    path('mgm/callback/', FfpayDepositCallbackView.as_view(), name='deposit-mgm-callback'),
+    path('quenpay/initiate/', QuenPayDepositInitiateView.as_view(), name='deposit-quenpay-initiate'),
+    path('quenpay/callback/', QuenPayDepositCallbackView.as_view(), name='deposit-quenpay-callback'),
     path('transactions/', DepositTransactionsListView.as_view(), name='deposit-transactions-list'),
 ]

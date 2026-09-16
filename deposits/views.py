@@ -22,7 +22,7 @@ import json
 import re
 import base64
 from django.http import HttpResponse
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urljoin
 
 from products.models import Transaction
 from products.serializers import TransactionSerializer
@@ -71,6 +71,17 @@ from .integrations.reepay import (
     post_json as reepay_post_json,
     verify_callback_signature as reepay_verify_callback_signature,
     extract_callback_field as reepay_extract_callback_field,
+)
+# FF Pay / LPAY / MGM memakai skema HMAC-SHA256 & envelope yang sama dengan Reepay
+from .integrations.reepay import (
+    post_json as ffpay_post_json,
+    verify_callback_signature as ffpay_verify_callback_signature,
+    extract_callback_field as ffpay_extract_callback_field,
+)
+# QuenPay (Quen Payment) QRIS Pay-In - signed request HMAC-SHA256
+from .integrations.quenpay import (
+    post_json as quenpay_post_json,
+    verify_callback_signature as quenpay_verify_callback_signature,
 )
 from withdrawal.integrations.jayapay import sign_params_legacy
 from .integrations.klikpay import build_params as klikpay_build_params, sign_params as klikpay_sign_params, send_prepaid_request as klikpay_send_prepaid
@@ -322,6 +333,11 @@ def _scrape_bankpay_payment_page(url: str, timeout: int = 30) -> dict:
         except Exception as e:
             logger.warning("Gagal fetch BankPay decrypted page: url=%s error=%s", decrypted[:200], str(e))
             return result
+
+    # --- Step 2a: Halaman Virtual Account (cash/html/*.html + bankdetail.js) ---
+    if "bankdetail.js" in content:
+        result.update(_bankpay_fetch_va_detail(decrypted_url or final_url, timeout))
+        return result
 
     # --- Step 2: Handle MoneyCome JSON API redirect ---
     if "application/json" in content_type:
@@ -576,6 +592,171 @@ def _scrape_bankpay_payment_page(url: str, timeout: int = 30) -> dict:
     if m2:
         result["display_amount"] = m2.group(1).strip()
         logger.warning("BANKPAY scrape: found display_amount=%s", result["display_amount"])
+    return result
+
+
+def _bankpay_fetch_va_detail(page_url: str, timeout: int = 20) -> dict:
+    """Ambil detail Virtual Account dari halaman cash provider.
+
+    Halaman .../cash/html/<BANK>.html?type=<BANK>&orderNum=<...> memuat VA lewat
+    POST {origin}/gateway/order/detail/v2 dengan header `ts` + `ss` — replikasi
+    skema dari ../js/bankdetail.js (ss = MD5 dari "k=v" terurut + &ts=<ts>).
+    """
+    parsed = urlparse(page_url or "")
+    qs = parse_qs(parsed.query)
+    method = (qs.get("type") or qs.get("method") or [""])[0].strip()
+    order_num = (qs.get("orderNum") or [""])[0].strip()
+    if not parsed.netloc or not method or not order_num:
+        return {}
+
+    ts = f"{int(pytime.time() * 1000)}{random.randint(1, 999999)}"
+    ss = hashlib.md5(
+        "&".join(sorted([f"method={method}", f"orderNum={order_num}", f"ts={ts}"])).encode()
+    ).hexdigest()
+    body = json.dumps({"method": method, "orderNum": order_num}, separators=(",", ":"))
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        resp = requests.post(
+            f"{origin}/gateway/order/detail/v2",
+            data=body.encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "ts": ts,
+                "ss": ss,
+                "Origin": origin,
+                "Referer": f"{origin}/",
+            },
+            timeout=timeout,
+        )
+        payload = resp.json()
+    except Exception as e:
+        logger.warning("BANKPAY VA detail gagal: url=%s error=%s", page_url[:120], str(e))
+        return {}
+
+    if not isinstance(payload, dict):
+        logger.warning("BANKPAY VA detail: respons bukan objek JSON: %s", str(payload)[:120])
+        return {}
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    if str(payload.get("code")) != "0" or not data:
+        logger.warning("BANKPAY VA detail ditolak: code=%s msg=%s", payload.get("code"), payload.get("msg"))
+        return {}
+    detail = {
+        "va_number": str(data.get("vaNumber") or "").strip(),
+        "va_name": str(data.get("name") or "").strip(),
+        "va_bank": str(data.get("methodStr") or "").strip() or method,
+        "display_amount": str(data.get("payMoney") or "").strip(),
+    }
+    logger.warning(
+        "BANKPAY VA detail: bank=%s va=%s name=%s amount=%s",
+        detail["va_bank"],
+        detail["va_number"],
+        detail["va_name"],
+        detail["display_amount"],
+    )
+    return detail
+
+
+def _scrape_mgm_payment_page(url: str, timeout: int = 15) -> dict:
+    """Scrape halaman cashier MGM (heypay) untuk QRIS.
+
+    pay_url (paycash.mgm-pay.com/...) redirect ke cashier.heypay.org; halamannya
+    memuat beberapa <img> (logo QRIS, logo merchant, ...) — logo dibuang dan gambar
+    QR (path mengandung 'qris') diunduh lalu dijadikan data URI base64 supaya bisa
+    langsung dirender tanpa hambatan hotlink/CORS.
+    """
+    result = {"qr_image": ""}
+    if not url:
+        return result
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    })
+    try:
+        resp = session.get(url, timeout=timeout, allow_redirects=True)
+        resp.raise_for_status()
+        html = resp.text
+        final_url = resp.url
+    except Exception as e:
+        logger.warning("Gagal fetch cashier MGM: url=%s error=%s", url, str(e))
+        return result
+
+    # ponytail: heuristik logo vs QR berbasis path; kalau struktur cashier berubah,
+    # tambah verifikasi (mis. dimensi gambar persegi) sebelum dipakai.
+    srcs = [urljoin(final_url, s) for s in re.findall(r'<img[^>]*\ssrc=["\']([^"\']+)["\']', html, re.IGNORECASE)]
+    candidates = [s for s in srcs if "logo" not in s.lower()]
+    qr_url = next((s for s in candidates if "qris" in s.lower()), candidates[0] if candidates else "")
+    if not qr_url:
+        logger.warning("MGM scrape: tidak ada kandidat gambar QR di %s", final_url[:120])
+        return result
+
+    try:
+        img = session.get(qr_url, timeout=timeout, allow_redirects=True)
+        img.raise_for_status()
+        img_ct = img.headers.get("Content-Type", "").lower()
+        if img_ct.startswith("image/"):
+            b64 = base64.b64encode(img.content).decode()
+            result["qr_image"] = f"data:{img_ct};base64,{b64}"
+            logger.warning("MGM scrape: qr_image %s bytes from %s", len(img.content), qr_url[:120])
+        else:
+            logger.warning("MGM scrape: bukan image ct=%s url=%s", img_ct, qr_url[:120])
+    except Exception as e:
+        logger.warning("MGM scrape: gagal fetch QR image %s: %s", qr_url[:120], str(e))
+    return result
+
+
+def _scrape_lpay_payment_page(url: str, timeout: int = 15) -> dict:
+    """Scrape QRIS dari halaman cashier LPAY (payment.*.com/pay?sessionId=...).
+
+    Halaman cashier LPAY adalah SPA Next.js yang dirender client-side, jadi QR tidak ada
+    di HTML. Data diambil dari API session publiknya:
+    GET {origin}/api/checkout/sessions/{sessionId} → qrPayload (string QRIS EMVCo).
+    qr_image digenerate lokal dari qr_string (data URI base64) supaya siap render.
+    """
+    result = {"qr_string": "", "qr_image": ""}
+    if not url:
+        return result
+    m = re.search(r"[?&]sessionId=([A-Za-z0-9-]{8,})", url)
+    if not m:
+        logger.warning("LPAY scrape: sessionId tidak ditemukan di %s", url[:120])
+        return result
+    parsed = urlparse(url)
+    api_url = f"{parsed.scheme}://{parsed.netloc}/api/checkout/sessions/{m.group(1)}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": url,
+    }
+    try:
+        resp = requests.get(api_url, timeout=timeout, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning("LPAY scrape: gagal fetch session %s: %s", api_url[:140], str(e))
+        return result
+    if not isinstance(data, dict):
+        logger.warning("LPAY scrape: payload bukan dict %s", api_url[:140])
+        return result
+    qr_string = str(data.get("qrPayload") or "").strip()
+    if not qr_string:
+        logger.warning("LPAY scrape: qrPayload kosong (mode=%s) %s", data.get("mode"), api_url[:140])
+        return result
+    result["qr_string"] = qr_string
+    try:
+        from .integrations.qris import generate_qr_image
+
+        result["qr_image"] = generate_qr_image(qr_string) or ""
+    except Exception as e:
+        logger.warning("LPAY scrape: gagal generate QR image: %s", str(e))
+    logger.warning("LPAY scrape: qr_string %s chars (mode=%s) from %s", len(qr_string), data.get("mode"), api_url[:140])
     return result
 
 
@@ -3948,12 +4129,27 @@ class BankPayDepositInitiateView(APIView):
                 dep.payment_url = pay_url
                 dep.save(update_fields=["payment_url"])
 
+            # VA (bankcode "bank") & QR: ambil detail dari halaman cash provider
+            scraped = {}
+            if pay_url:
+                logger.warning("BANKPAY: scraping pay_url=%s...", pay_url[:120])
+                scraped = _scrape_bankpay_payment_page(pay_url)
+                logger.warning(
+                    "BANKPAY: scrape done va=%s display_amount=%s",
+                    scraped.get("va_number"),
+                    scraped.get("display_amount"),
+                )
+
             return Response(
                 {
                     "order_num": order_num,
                     "amount": pay_amount,
+                    "display_amount": scraped.get("display_amount", ""),
                     "pay_url": pay_url or None,
                     "qr_code": qr_code or "",
+                    "va_number": scraped.get("va_number", ""),
+                    "va_bank": scraped.get("va_bank", ""),
+                    "va_name": scraped.get("va_name", ""),
                     "provider": response_payload,
                 },
                 status=status.HTTP_200_OK,
@@ -4106,6 +4302,9 @@ class BankPayDepositInitiateQRView(APIView):
                     "pay_url": pay_url or None,
                     "qr_code": qr_code or "",
                     "qr_image": scraped.get("qr_image", ""),
+                    "va_number": scraped.get("va_number", ""),
+                    "va_bank": scraped.get("va_bank", ""),
+                    "va_name": scraped.get("va_name", ""),
                     "provider": response_payload,
                 },
                 status=status.HTTP_200_OK,
@@ -4801,4 +5000,633 @@ class ReepayDepositSelectMethodView(APIView):
             {"detail": detail_msg or "Gagal memilih metode pembayaran", "provider": resp_data},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+# ============================================================
+# FF Pay / LPAY / MGM Gateway Views (satu platform, HMAC-SHA256)
+# ============================================================
+
+FFPAY_GATEWAYS = ("FFPAY", "LPAY", "MGM")
+
+
+def _ffpay_raw_body(request) -> str:
+    raw = request.body or b""
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _ffpay_callback_payload(request) -> dict:
+    raw = _ffpay_raw_body(request)
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    if isinstance(getattr(request, "data", None), dict):
+        return request.data
+    return {}
+
+
+def _ffpay_verify_callback(request, secret: str) -> bool:
+    timestamp = (request.META.get("HTTP_X_TIMESTAMP") or "").strip()
+    signature = (request.META.get("HTTP_X_SIGNATURE") or "").strip()
+    webhook_path = request.path
+    raw_body = _ffpay_raw_body(request)
+    return ffpay_verify_callback_signature(secret, timestamp, webhook_path, raw_body, signature)
+
+
+def _ffpay_handle_payment_callback(request, payload: dict):
+    """Proses callback payment.* dari FF Pay / LPAY / MGM (deposit).
+
+    Satu URL webhook dipakai untuk semua wallet; deposit dicocokkan via merchant_ref.
+    """
+    gs = GatewaySettings.objects.order_by("-updated_at").first()
+    secret_key = (gs.ffpay_secret_key or "").strip() if gs else ""
+
+    event = str(ffpay_extract_callback_field(payload, "event") or "").strip()
+    merchant_ref = str(ffpay_extract_callback_field(payload, "merchant_ref") or "").strip()
+
+    # Satu URL webhook FF Pay: route event disbursement.* ke handler withdrawal
+    # (dipakai bila Payout Webhook URL dikosongkan dan memakai URL collections)
+    if event.startswith("disbursement."):
+        try:
+            from withdrawal.views import _ffpay_handle_withdraw_callback
+            _ffpay_handle_withdraw_callback(request, payload)
+        except Exception as e:
+            logger.warning("FFPAY: gagal route disbursement callback: %s", e)
+        return
+
+    if not merchant_ref:
+        return
+
+    sign_valid = _ffpay_verify_callback(request, secret_key)
+
+    trx = Transaction.objects.filter(trx_id=merchant_ref).first()
+    dep = Deposit.objects.filter(order_num=merchant_ref, gateway__in=FFPAY_GATEWAYS).first()
+
+    if dep:
+        cb = dict(payload)
+        cb["_sign_valid"] = sign_valid
+        dep.callback_payload = cb
+        dep.callback_at = timezone.now()
+        dep.save(update_fields=["callback_payload", "callback_at"])
+
+    if not trx or not sign_valid:
+        return
+
+    if event == "payment.paid":
+        paid_amount = None
+        amount_val = ffpay_extract_callback_field(payload, "amount")
+        if amount_val is not None:
+            try:
+                paid_amount = Decimal(str(amount_val)).quantize(Decimal("0.01"))
+            except Exception:
+                paid_amount = None
+        _ppaypros_complete_deposit(trx, dep, paid_amount=paid_amount)
+    elif event in ("payment.failed", "payment.expired"):
+        _ppaypros_mark_deposit_failed(trx, dep)
+
+
+def _ffpay_init_common(request, *, gateway: str, enable_flag: str, order_prefix: str, provider_label: str):
+    """Validasi request + buat Transaction/Deposit untuk initiate FF Pay/LPAY/MGM.
+
+    Return (error_response, None) atau (None, ctx) dengan
+    ctx = (api_url, api_key, secret_key, trx, dep, payload, amount_int).
+    """
+    gs = GatewaySettings.objects.order_by("-updated_at").first()
+    enabled = bool(gs and getattr(gs, enable_flag, False))
+    api_url = (gs.ffpay_api_url or "").strip() if gs else ""
+    api_key = (gs.ffpay_api_key or "").strip() if gs else ""
+    secret_key = (gs.ffpay_secret_key or "").strip() if gs else ""
+    min_deposit_amount = (gs.min_deposit_amount or Decimal("0")) if gs else Decimal("0")
+    max_deposit_amount = (gs.max_deposit_amount or Decimal("0")) if gs else Decimal("0")
+
+    if not enabled:
+        return Response({"detail": PG_INACTIVE_MESSAGE}, status=status.HTTP_400_BAD_REQUEST), None
+    if not api_url or not api_key or not secret_key:
+        return Response({"detail": f"Konfigurasi {provider_label} belum lengkap"}, status=status.HTTP_400_BAD_REQUEST), None
+
+    wallet_type = (request.data.get("wallet_type") or (gs.default_wallet_type if gs else "") or "BALANCE").strip().upper()
+    if wallet_type not in ("BALANCE", "BALANCE_DEPOSIT"):
+        return Response({"detail": "wallet_type tidak valid"}, status=status.HTTP_400_BAD_REQUEST), None
+
+    amount_raw = request.data.get("amount")
+    try:
+        amount = Decimal(str(amount_raw)).quantize(Decimal("0.01"))
+        if amount <= 0:
+            raise InvalidOperation()
+    except Exception:
+        return Response({"detail": "amount tidak valid"}, status=status.HTTP_400_BAD_REQUEST), None
+
+    if min_deposit_amount and min_deposit_amount > 0 and amount < min_deposit_amount:
+        return Response({"detail": f"Minimal deposit adalah {min_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST), None
+    if max_deposit_amount and max_deposit_amount > 0 and amount > max_deposit_amount:
+        return Response({"detail": f"Maksimal deposit adalah {max_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST), None
+
+    user = request.user
+    order_num = f"{order_prefix}{_now_wib().strftime('%y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+    # FF Pay hanya menerima nominal integer IDR
+    amount_int = int(round(float(amount)))
+
+    trx = Transaction.objects.create(
+        user=user,
+        product=None,
+        type="DEPOSIT",
+        amount=amount,
+        currency_code="IDR",
+        description=f"Deposit via {provider_label} ({wallet_type})",
+        status="PENDING",
+        wallet_type=wallet_type,
+        trx_id=order_num,
+    )
+
+    payload = {
+        "amount": amount_int,
+        "merchant_ref": order_num,
+        "customer_name": (user.full_name or user.username or "")[:100],
+        "customer_email": (getattr(user, "email", "") or "")[:100],
+        "customer_phone": (getattr(user, "phone", "") or "")[:32],
+        "description": f"Deposit {provider_label} ({wallet_type})"[:100],
+    }
+    if gateway == "LPAY":
+        payload["code"] = ((gs.lpay_code or "3560") if gs else "3560").strip()[:32] or "3560"
+    elif gateway == "MGM":
+        method = ((gs.mgm_method or "QRCODE") if gs else "QRCODE").strip().upper()
+        payload["method"] = method if method in ("WALLET", "QRCODE") else "QRCODE"
+    else:
+        # FF Pay: cashier mode, metode dipilih di halaman pembayaran FF Pay
+        payload["method"] = ""
+        expiry_period = request.data.get("expiry_period")
+        if expiry_period is not None:
+            try:
+                payload["expiry_period"] = int(expiry_period)
+            except Exception:
+                pass
+    return_url = (gs.ffpay_return_url or "").strip() if gs else ""
+    if return_url:
+        payload["return_url"] = return_url
+
+    dep = Deposit.objects.create(
+        user=user,
+        gateway=gateway,
+        order_num=order_num,
+        amount=amount,
+        amount_currency_code="IDR",
+        wallet_type=wallet_type,
+        status="PENDING",
+        transaction=trx,
+        request_params=payload,
+    )
+    return None, (api_url, api_key, secret_key, trx, dep, payload, amount_int)
+
+
+def _ffpay_finish_initiate(dep: Deposit, trx: Transaction, resp_data: dict, amount_int: int, provider_label: str):
+    dep.response_payload = resp_data
+    dep.save(update_fields=["response_payload"])
+
+    if resp_data.get("success"):
+        data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+        pay_url = (data.get("pay_url") or "").strip()
+        ref_id = (data.get("ref_id") or "").strip()
+        if pay_url:
+            dep.payment_url = pay_url
+            dep.save(update_fields=["payment_url"])
+
+        # MGM QRIS (/gateway/mgm/qris): pay_data = QR URL siap render (pay_data_type QR_URL/QR_CODE),
+        # qr_url = URL gambar mentah dari provider (debug/referensi saja).
+        pay_data = (data.get("pay_data") or "").strip()
+        pay_data_type = (data.get("pay_data_type") or "").strip()
+        qr_url = (data.get("qr_url") or "").strip()
+
+        # MGM/LPAY: platform kadang tidak mengekstrak QR (pay_data null, pay_data_type PG_URL).
+        # Fallback scrape pay_url — MGM: gambar QR dari halaman cashier (qr_image data URI),
+        # LPAY: qr_string QRIS dari API session cashier + qr_image hasil generate lokal.
+        qr_image = ""
+        qr_string = ""
+        if not pay_data and pay_url:
+            if dep.gateway == "MGM":
+                method = str((dep.request_params or {}).get("method") or "").strip().upper()
+                if method == "QRCODE":
+                    qr_image = _scrape_mgm_payment_page(pay_url).get("qr_image", "")
+            elif dep.gateway == "LPAY":
+                scraped = _scrape_lpay_payment_page(pay_url)
+                qr_string = scraped.get("qr_string", "")
+                qr_image = scraped.get("qr_image", "")
+
+        return Response(
+            {
+                "order_num": dep.order_num,
+                "ref_id": ref_id,
+                "amount": amount_int,
+                "pay_url": pay_url or None,
+                "pay_data": pay_data or None,
+                "pay_data_type": pay_data_type or None,
+                "qr_url": qr_url or None,
+                "qr_string": qr_string or None,
+                "qr_image": qr_image,
+                "expires_at": data.get("expires_at"),
+                "provider": resp_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    _ppaypros_mark_deposit_failed(trx, dep)
+
+    detail_msg = (
+        resp_data.get("message")
+        or resp_data.get("detail")
+        or resp_data.get("msg")
+        or ""
+    )
+    if isinstance(detail_msg, str) and _looks_like_html(detail_msg):
+        detail_msg = "Layanan sedang tidak tersedia"
+
+    return Response(
+        {"detail": detail_msg or f"{provider_label} payin gagal", "provider": resp_data},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class _FfpayDepositInitiateBase(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "deposit_initiate"
+
+    gateway = ""
+    enable_flag = ""
+    order_prefix = ""
+    api_path = ""
+    provider_label = ""
+
+    def get_api_path(self, payload: dict) -> str:
+        return self.api_path
+
+    @extend_schema(
+        summary="Inisiasi deposit via FF Pay / LPAY / MGM",
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "example": 100000},
+                    "wallet_type": {"type": "string", "enum": ["BALANCE", "BALANCE_DEPOSIT"], "example": "BALANCE"},
+                    "expiry_period": {"type": "integer", "example": 1440},
+                },
+                "required": ["amount"],
+            }
+        },
+    )
+    def post(self, request):
+        error, ctx = _ffpay_init_common(
+            request,
+            gateway=self.gateway,
+            enable_flag=self.enable_flag,
+            order_prefix=self.order_prefix,
+            provider_label=self.provider_label,
+        )
+        if error:
+            return error
+
+        api_url, api_key, secret_key, trx, dep, payload, amount_int = ctx
+        resp_data, _http_status = ffpay_post_json(
+            api_key, secret_key, self.get_api_path(payload), payload, base_url=api_url
+        )
+        return _ffpay_finish_initiate(dep, trx, resp_data, amount_int, self.provider_label)
+
+
+class FfpayDepositInitiateView(_FfpayDepositInitiateBase):
+    gateway = "FFPAY"
+    enable_flag = "ffpay_enabled"
+    order_prefix = "DFF"
+    api_path = "/gateway/charge/create"
+    provider_label = "FF Pay"
+
+
+class LpayDepositInitiateView(_FfpayDepositInitiateBase):
+    gateway = "LPAY"
+    enable_flag = "lpay_enabled"
+    order_prefix = "DLP"
+    api_path = "/gateway/lpay/payin"
+    provider_label = "LPAY"
+
+
+class MgmDepositInitiateView(_FfpayDepositInitiateBase):
+    gateway = "MGM"
+    enable_flag = "mgm_enabled"
+    order_prefix = "DMG"
+    api_path = "/gateway/mgm/payin"
+    provider_label = "MGM Pay"
+
+    def get_api_path(self, payload: dict) -> str:
+        # QRCODE pakai /gateway/mgm/qris (pay_data = QR URL siap render);
+        # /gateway/mgm/payin hanya menerima WALLET
+        return "/gateway/mgm/qris" if payload.get("method") == "QRCODE" else self.api_path
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class FfpayDepositCallbackView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "gateway_callback"
+
+    @extend_schema(summary="Callback FF Pay / LPAY / MGM untuk update status deposit")
+    def post(self, request):
+        payload = _ffpay_callback_payload(request)
+        _ffpay_handle_payment_callback(request, payload)
+        return HttpResponse("OK", content_type="text/plain")
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class FfpayDepositSelectMethodView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "deposit_initiate"
+
+    @extend_schema(
+        summary="Pilih metode pembayaran FF Pay langsung via API (tanpa halaman pembayaran)",
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "ref_id": {"type": "string", "example": "TXN260815AB12CD34"},
+                    "method": {"type": "string", "enum": ["QRIS", "BRI", "PERMATA", "MANDIRI"], "example": "QRIS"},
+                },
+                "required": ["ref_id", "method"],
+            }
+        },
+    )
+    def post(self, request):
+        gs = GatewaySettings.objects.order_by("-updated_at").first()
+        enabled = bool(gs and gs.ffpay_enabled)
+        api_url = (gs.ffpay_api_url or "").strip() if gs else ""
+        api_key = (gs.ffpay_api_key or "").strip() if gs else ""
+        secret_key = (gs.ffpay_secret_key or "").strip() if gs else ""
+
+        if not enabled:
+            return Response({"detail": PG_INACTIVE_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+        if not api_url or not api_key or not secret_key:
+            return Response({"detail": "Konfigurasi FF Pay belum lengkap"}, status=status.HTTP_400_BAD_REQUEST)
+
+        ref_id = str(request.data.get("ref_id") or "").strip()
+        method = str(request.data.get("method") or "").strip().upper()
+
+        if not ref_id:
+            return Response({"detail": "ref_id wajib diisi"}, status=status.HTTP_400_BAD_REQUEST)
+        if method not in ("QRIS", "BRI", "PERMATA", "MANDIRI"):
+            return Response({"detail": "method harus salah satu dari QRIS, BRI, PERMATA, MANDIRI"}, status=status.HTTP_400_BAD_REQUEST)
+
+        resp_data, _http_status = ffpay_post_json(
+            api_key,
+            secret_key,
+            f"/gateway/charge/{ref_id}/method",
+            {"method": method},
+            base_url=api_url,
+        )
+
+        if resp_data.get("success"):
+            data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+            return Response(
+                {
+                    "ref_id": (data.get("ref_id") or "").strip(),
+                    "merchant_ref": (data.get("merchant_ref") or "").strip(),
+                    "method": (data.get("method") or method).strip(),
+                    "pay_data": (data.get("pay_data") or "").strip(),
+                    "pay_data_type": (data.get("pay_data_type") or "").strip(),
+                    "pay_url": (data.get("pay_url") or "").strip(),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        detail_msg = (
+            resp_data.get("message")
+            or resp_data.get("detail")
+            or resp_data.get("msg")
+            or ""
+        )
+        if isinstance(detail_msg, str) and _looks_like_html(detail_msg):
+            detail_msg = "Layanan sedang tidak tersedia"
+
+        return Response(
+            {"detail": detail_msg or "Gagal memilih metode pembayaran FF Pay", "provider": resp_data},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+# ============================================================
+# QuenPay (Quen Payment) QRIS Pay-In Views - signed request
+# ============================================================
+# Pay-In QRIS only (Payout API belum aktif di Quen).
+# Auth: X-Quen-Api-Key, X-Quen-Timestamp (unix detik), X-Quen-Nonce, X-Quen-Signature.
+# Callback dikirim hanya saat payment.success (setelah DB commit). Idempotent.
+
+def _quenpay_raw_body(request) -> str:
+    raw = request.body or b""
+    try:
+        return raw.decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _quenpay_callback_payload(request) -> dict:
+    raw = _quenpay_raw_body(request)
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    if isinstance(getattr(request, "data", None), dict):
+        return request.data
+    return {}
+
+
+def _quenpay_verify_callback(request, secret: str) -> bool:
+    timestamp = (request.META.get("HTTP_X_QUEN_TIMESTAMP") or "").strip()
+    signature = (request.META.get("HTTP_X_QUEN_SIGNATURE") or "").strip()
+    raw_body = _quenpay_raw_body(request)
+    return quenpay_verify_callback_signature(secret, timestamp, raw_body, signature)
+
+
+def _quenpay_handle_callback(request, payload: dict):
+    """Proses callback QuenPay. Hanya event payment.success yang dikirim."""
+    gs = GatewaySettings.objects.order_by("-updated_at").first()
+    secret_key = (gs.quenpay_secret_key or "").strip() if gs else ""
+
+    event = str(payload.get("event") or "").strip()
+    order_id = str(payload.get("order_id") or "").strip()
+
+    if not order_id:
+        return
+
+    trx = Transaction.objects.filter(trx_id=order_id).first()
+    dep = Deposit.objects.filter(order_num=order_id, gateway="QUENPAY").first()
+
+    sign_valid = _quenpay_verify_callback(request, secret_key)
+
+    if dep:
+        callback_payload = dict(payload)
+        callback_payload["_sign_valid"] = sign_valid
+        dep.callback_payload = callback_payload
+        dep.callback_at = timezone.now()
+        dep.save(update_fields=["callback_payload", "callback_at"])
+
+    if not trx or not sign_valid:
+        return
+
+    if event == "payment.success":
+        # QuenPay: `amount` = nominal order, `payment_amount` = nominal + unique_code.
+        # Kode unik membuat payment_amount selalu LEBIH BESAR dari order (mis. 50.002 vs 50.000),
+        # jadi validasi mismatch harus pakai `amount` (nominal order), BUKAN payment_amount.
+        # Kredit tetap memakai trx.amount — persis pola QRIS internal.
+        paid_amount = None
+        amount_val = payload.get("amount")
+        if amount_val is not None:
+            try:
+                paid_amount = Decimal(str(amount_val)).quantize(Decimal("0.01"))
+            except Exception:
+                paid_amount = None
+        _ppaypros_complete_deposit(trx, dep, paid_amount=paid_amount)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class QuenPayDepositInitiateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "deposit_initiate"
+
+    @extend_schema(
+        summary="Inisiasi deposit QRIS via QuenPay",
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "example": 50000},
+                    "wallet_type": {"type": "string", "enum": ["BALANCE", "BALANCE_DEPOSIT"], "example": "BALANCE"},
+                },
+                "required": ["amount"],
+            }
+        },
+    )
+    def post(self, request):
+        gs = GatewaySettings.objects.order_by("-updated_at").first()
+        enabled = bool(gs and gs.quenpay_enabled)
+        api_url = (gs.quenpay_api_url or "").strip() if gs else ""
+        api_key = (gs.quenpay_api_key or "").strip() if gs else ""
+        secret_key = (gs.quenpay_secret_key or "").strip() if gs else ""
+        min_deposit_amount = (gs.min_deposit_amount or Decimal("0")) if gs else Decimal("0")
+        max_deposit_amount = (gs.max_deposit_amount or Decimal("0")) if gs else Decimal("0")
+
+        if not enabled:
+            return Response({"detail": PG_INACTIVE_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+        if not api_url or not api_key or not secret_key:
+            return Response({"detail": "Konfigurasi QuenPay belum lengkap"}, status=status.HTTP_400_BAD_REQUEST)
+
+        wallet_type = (request.data.get("wallet_type") or gs.default_wallet_type or "BALANCE").strip().upper()
+        if wallet_type not in ("BALANCE", "BALANCE_DEPOSIT"):
+            return Response({"detail": "wallet_type tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
+
+        amount_raw = request.data.get("amount")
+        try:
+            amount = Decimal(str(amount_raw)).quantize(Decimal("0.01"))
+            if amount <= 0:
+                raise InvalidOperation()
+        except Exception:
+            return Response({"detail": "amount tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if min_deposit_amount and min_deposit_amount > 0 and amount < min_deposit_amount:
+            return Response({"detail": f"Minimal deposit adalah {min_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST)
+        if max_deposit_amount and max_deposit_amount > 0 and amount > max_deposit_amount:
+            return Response({"detail": f"Maksimal deposit adalah {max_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        order_num = f"DQP{_now_wib().strftime('%y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+        # QuenPay hanya menerima nominal integer IDR
+        amount_int = int(round(float(amount)))
+
+        payload = {
+            "order_id": order_num,
+            "amount": amount_int,
+            "description": f"Deposit QuenPay ({wallet_type})"[:255],
+        }
+
+        trx = Transaction.objects.create(
+            user=user,
+            product=None,
+            type="DEPOSIT",
+            amount=amount,
+            currency_code="IDR",
+            description=f"Deposit via QuenPay ({wallet_type})",
+            status="PENDING",
+            wallet_type=wallet_type,
+            trx_id=order_num,
+        )
+
+        dep = Deposit.objects.create(
+            user=user,
+            gateway="QUENPAY",
+            order_num=order_num,
+            amount=amount,
+            amount_currency_code="IDR",
+            wallet_type=wallet_type,
+            status="PENDING",
+            transaction=trx,
+            request_params=payload,
+        )
+
+        resp_data, _http_status = quenpay_post_json(
+            api_key, secret_key, "/api/v1/payment/create", payload, base_url=api_url
+        )
+
+        dep.response_payload = resp_data
+        dep.save(update_fields=["response_payload"])
+
+        if resp_data.get("success"):
+            data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+            qr_string = (data.get("qr_string") or "").strip()
+            quen_order_id = (data.get("quen_order_id") or "").strip()
+            if qr_string:
+                dep.payment_url = qr_string  # simpan raw QRIS payload
+                dep.save(update_fields=["payment_url"])
+
+            return Response(
+                {
+                    "order_num": order_num,
+                    "quen_order_id": quen_order_id,
+                    "amount": amount_int,
+                    "qr_string": qr_string,
+                    "status": data.get("status") or "PENDING",
+                    "expired_at": data.get("expired_at"),
+                    "provider": resp_data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        _ppaypros_mark_deposit_failed(trx, dep)
+
+        detail_msg = (
+            resp_data.get("message")
+            or resp_data.get("detail")
+            or resp_data.get("msg")
+            or ""
+        )
+        if isinstance(detail_msg, str) and _looks_like_html(detail_msg):
+            detail_msg = "Layanan sedang tidak tersedia"
+
+        return Response(
+            {"detail": detail_msg or "QuenPay payin gagal", "code": resp_data.get("code"), "provider": resp_data},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class QuenPayDepositCallbackView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "gateway_callback"
+
+    @extend_schema(summary="Callback QuenPay payment.success untuk update status deposit")
+    def post(self, request):
+        payload = _quenpay_callback_payload(request)
+        _quenpay_handle_callback(request, payload)
+        return HttpResponse("OK", content_type="text/plain")
 

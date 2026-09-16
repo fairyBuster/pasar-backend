@@ -21,6 +21,10 @@ from .views import (
     BankPayPayoutCallbackView,
     ReepayPayoutInitiateView,
     ReepayPayoutCallbackView,
+    FfpayPayoutInitiateView,
+    LpayPayoutInitiateView,
+    MgmPayoutInitiateView,
+    FfpayPayoutCallbackView,
     WithdrawalTransactionsListView,
 )
 
@@ -46,5 +50,11 @@ urlpatterns = [
     path('bankpay/callback/', BankPayPayoutCallbackView.as_view(), name='withdrawal-bankpay-callback'),
     path('reepay/initiate/<int:pk>/', ReepayPayoutInitiateView.as_view(), name='withdrawal-reepay-initiate'),
     path('reepay/callback/', ReepayPayoutCallbackView.as_view(), name='withdrawal-reepay-callback'),
+    path('ffpay/initiate/<int:pk>/', FfpayPayoutInitiateView.as_view(), name='withdrawal-ffpay-initiate'),
+    path('lpay/initiate/<int:pk>/', LpayPayoutInitiateView.as_view(), name='withdrawal-lpay-initiate'),
+    path('mgm/initiate/<int:pk>/', MgmPayoutInitiateView.as_view(), name='withdrawal-mgm-initiate'),
+    path('ffpay/callback/', FfpayPayoutCallbackView.as_view(), name='withdrawal-ffpay-callback'),
+    path('lpay/callback/', FfpayPayoutCallbackView.as_view(), name='withdrawal-lpay-callback'),
+    path('mgm/callback/', FfpayPayoutCallbackView.as_view(), name='withdrawal-mgm-callback'),
     path('transactions/', WithdrawalTransactionsListView.as_view(), name='withdrawal-transactions'),
 ]

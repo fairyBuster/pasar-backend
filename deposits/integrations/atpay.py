@@ -122,7 +122,9 @@ def verify_rsa_sign(params: dict, public_key: str, signature: str) -> bool:
 
 
 def verify_payload(params: dict, sign_type: str, *, secret_key: str = "", public_key: str = "") -> bool:
-    payload = dict(params or {})
+    # .items() (bukan dict(params)): dict(QueryDict) memakai fast-path dan menyimpan value
+    # sebagai list untuk callback form/multipart, sehingga sign selalu mismatch.
+    payload = dict((params or {}).items())
     signature = str(payload.pop("sign", "") or "").strip()
     if not signature:
         return False

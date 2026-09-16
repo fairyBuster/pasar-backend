@@ -2,7 +2,7 @@ from decimal import Decimal
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -13,6 +13,7 @@ from products.models import Transaction
 from .models import Withdrawal, WithdrawalSettings
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class WithdrawalSettingsTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -58,7 +59,7 @@ class WithdrawalSettingsTest(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data[0], "Withdraw sedang dimatikan oleh admin.")
+        self.assertEqual(response.data["non_field_errors"][0], "Withdraw sedang dimatikan oleh admin.")
 
     def test_max_withdrawal_count_blocks_second_request(self):
         WithdrawalSettings.objects.create(
@@ -85,7 +86,7 @@ class WithdrawalSettingsTest(TestCase):
 
         self.assertEqual(second_response.status_code, 400)
         self.assertEqual(
-            second_response.data[0],
+            second_response.data["non_field_errors"][0],
             "Maksimal penarikan hanya 1 kali per hari untuk akun ini.",
         )
         self.assertEqual(Withdrawal.objects.filter(user=self.user).count(), 1)
@@ -120,6 +121,7 @@ class WithdrawalSettingsTest(TestCase):
         self.assertEqual(Withdrawal.objects.filter(user=self.user).count(), 2)
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class PPayProsWithdrawalCallbackTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -199,6 +201,7 @@ class PPayProsWithdrawalCallbackTest(TestCase):
         self.assertEqual(trx.status, "COMPLETED")
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class AtpayWithdrawalCallbackTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -279,3 +282,21 @@ class AtpayWithdrawalCallbackTest(TestCase):
 
         self.assertEqual(withdrawal.status, "COMPLETED")
         self.assertEqual(trx.status, "COMPLETED")
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class BankPayWithdrawalCallbackTest(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        WithdrawalSettings.objects.create(
+            is_active=True,
+            bankpay_payout_enabled=True,
+            bankpay_payout_key="BPSECRET",
+        )
+
+    def test_empty_json_ping_returns_ok(self):
+        # dashboard BankPay bisa kirim test ping kosong saat registrasi callback — tidak boleh 500
+        # (request.body tidak boleh diakses setelah DRF membaca stream JSON)
+        resp = self.client.post("/api/withdrawals/bankpay/callback/", {}, format="json")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content.decode().strip(), "OK")

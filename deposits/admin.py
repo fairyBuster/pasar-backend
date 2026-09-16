@@ -8,7 +8,7 @@ from django.utils import timezone
 @admin.register(GatewaySettings)
 class GatewaySettingsAdmin(admin.ModelAdmin):
     list_display = (
-        'default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'usd_gateway_min_deposit_amount', 'usd_gateway_max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'updated_at'
+        'default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'usd_gateway_min_deposit_amount', 'usd_gateway_max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled', 'updated_at'
     )
     readonly_fields = ('updated_at',)
 
@@ -17,7 +17,7 @@ class GatewaySettingsAdmin(admin.ModelAdmin):
         return not GatewaySettings.objects.exists()
     fieldsets = (
         ('Global', {
-            'fields': ('default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled')
+            'fields': ('default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled')
         }),
         ('Jayapay', {
             'fields': (
@@ -117,7 +117,9 @@ class GatewaySettingsAdmin(admin.ModelAdmin):
                 'bankpay_key',
                 'bankpay_return_url',
             ),
-            'description': 'Konfigurasi BankPay untuk deposit IDR. Sign MD5, callback return OK plain text.',
+            'description': 'Konfigurasi BankPay untuk deposit IDR. Sign MD5, callback return OK plain text. '
+                           'Initiate menyertakan hasil scrape pay_url: qr_image (data URI) untuk QR, atau '
+                           'va_number/va_bank/va_name/display_amount untuk Virtual Account (bankcode bank).',
         }),
         ('QRIS Manual', {
             'fields': (
@@ -134,7 +136,44 @@ class GatewaySettingsAdmin(admin.ModelAdmin):
                 'reepay_secret_key',
                 'reepay_return_url',
             ),
-            'description': 'Konfigurasi Reepay (RogueCDN). Auth HMAC-SHA256 via header X-API-Key, X-Timestamp, X-Signature.',
+            'description': 'Konfigurasi Reepay (RogueCDN). Auth HMAC-SHA256 via header X-API-Key, X-Timestamp, X-Signature.'
+        }),
+        ('FF Pay', {
+            'fields': (
+                'ffpay_api_url',
+                'ffpay_api_key',
+                'ffpay_secret_key',
+                'ffpay_return_url',
+            ),
+            'description': 'Konfigurasi FF Pay (pay-in cashier mode). Kredensial dipakai bersama LPAY & MGM. '
+                           'Webhook collections arahkan ke /api/deposits/ffpay/callback/ (satu URL untuk semua wallet).'
+        }),
+        ('LPAY', {
+            'fields': (
+                'lpay_code',
+            ),
+            'description': 'Kode channel LPAY (contoh: 3560 untuk QRIS). Pay-in memakai endpoint /gateway/lpay/payin. '
+                           'QR di-scrape dari API session halaman cashier dan dikirim sebagai qr_string (payload QRIS) '
+                           '+ qr_image (data URI siap render).'
+        }),
+        ('MGM', {
+            'fields': (
+                'mgm_method',
+            ),
+            'description': (
+                'Metode MGM: QRCODE (QRIS) atau WALLET (e-wallet). '
+                'QRCODE memakai endpoint /gateway/mgm/qris; bila platform tidak mengekstrak QR '
+                '(pay_data null), QR di-scrape dari halaman cashier dan dikirim sebagai qr_image '
+                '(data URI siap render). WALLET memakai /gateway/mgm/payin (redirect ke cashier MGM).'
+            )
+        }),
+        ('QuenPay', {
+            'fields': (
+                'quenpay_api_url',
+                'quenpay_api_key',
+                'quenpay_secret_key',
+            ),
+            'description': 'Konfigurasi QuenPay (QRIS Pay-In only). Signed request HMAC-SHA256: X-Quen-Api-Key, X-Quen-Timestamp (unix detik), X-Quen-Nonce, X-Quen-Signature. Timestamp +-5 menit, nonce anti-replay. Callback: /api/deposits/quenpay/callback/.'
         }),
     )
 

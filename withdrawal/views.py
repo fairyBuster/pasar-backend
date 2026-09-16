@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from django.http import HttpResponse
 
 from .integrations.jayapay import build_params, sign_params_legacy, send_cash_request
-from .models import JayapayWithdrawal, JayapayPhPayoutWithdrawal, UsdPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal
+from .models import JayapayWithdrawal, JayapayPhPayoutWithdrawal, UsdPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal, FfpayWithdrawal
 from products.models import Transaction
 from products.serializers import TransactionSerializer
 from django.db.models import Q
@@ -51,6 +51,7 @@ from deposits.integrations.reepay import (
 )
 from deposits.utils import verify_jayapay_signature
 from .integrations.jayapay_ph_banks import JAYAPAY_PH_PAYOUT_BANKS
+from .integrations.ffpay import ffpay_payout_bank_code
 
 logger = logging.getLogger(__name__)
 
@@ -905,7 +906,8 @@ class AtpayPayoutCallbackView(generics.GenericAPIView):
         gs = WithdrawalSettings.objects.order_by("-updated_at").first()
         secret_key = (gs.atpay_payout_secret_key or "").strip() if gs else ""
         public_key = (gs.atpay_payout_public_key or "").strip() if gs else ""
-        payload = request.data if isinstance(request.data, dict) else {}
+        # .items() wajib: QueryDict form/multipart menyimpan value sebagai list per key.
+        payload = dict(request.data.items()) if isinstance(request.data, dict) else {}
         order_num = str(payload.get("out_trade_sn") or "").strip()
         if not order_num:
             return HttpResponse("success", content_type="text/plain")
@@ -1433,7 +1435,11 @@ def _bankpay_withdraw_collect_payload(request) -> dict:
         else:
             result[k] = v
     if not result:
-        raw = request.body or b""
+        try:
+            raw = request.body or b""
+        except Exception:
+            # DRF sudah membaca body (mis. JSON kosong) — request.body tidak bisa diakses lagi.
+            raw = b""
         try:
             body_str = raw.decode("utf-8")
         except Exception:
@@ -1611,4 +1617,207 @@ class ReepayPayoutCallbackView(APIView):
     def post(self, request, *args, **kwargs):
         payload = _reepay_withdraw_callback_payload(request)
         _reepay_handle_withdraw_callback(request, payload)
+        return HttpResponse("OK", content_type="text/plain")
+
+
+# ============================================================
+# FF Pay / LPAY / MGM Payout Views (HMAC-SHA256, skema sama dengan Reepay)
+# ============================================================
+
+FFPAY_PAYOUT_WALLETS = {
+    "ffpay": {"flag": "ffpay_payout_enabled", "path": "/gateway/payout/create", "label": "FF Pay"},
+    "lpay": {"flag": "lpay_payout_enabled", "path": "/gateway/lpay/payout", "label": "LPAY"},
+    "mgm": {"flag": "mgm_payout_enabled", "path": "/gateway/mgm/payout", "label": "MGM Pay"},
+}
+
+FFPAY_PAYOUT_MIN_AMOUNT = 10000
+FFPAY_PAYOUT_MAX_AMOUNT = 50000000
+
+
+def _ffpay_handle_withdraw_callback(request, payload: dict):
+    """Proses callback disbursement.* dari FF Pay / LPAY / MGM (payout)."""
+    gs = WithdrawalSettings.objects.order_by("-updated_at").first()
+    secret_key = (gs.ffpay_payout_secret_key or "").strip() if gs else ""
+
+    event = str(reepay_extract_callback_field(payload, "event") or "").strip()
+    merchant_ref = str(reepay_extract_callback_field(payload, "merchant_ref") or "").strip()
+
+    if not merchant_ref:
+        return
+
+    # Helper `_reepay_withdraw_*` generik (HMAC-SHA256 identik); secret diambil dari setting FF Pay
+    sign_valid = _reepay_withdraw_verify_callback(request, secret_key)
+
+    trx = Transaction.objects.filter(trx_id=merchant_ref).first()
+    withdrawal = Withdrawal.objects.filter(transaction=trx).first() if trx else None
+
+    trace = FfpayWithdrawal.objects.filter(withdrawal=withdrawal).first() if withdrawal else None
+    if trace:
+        stored = trace.response_payload if isinstance(trace.response_payload, dict) else {}
+        stored["callback"] = {**payload, "_sign_valid": sign_valid}
+        trace.response_payload = stored
+        trace.save(update_fields=["response_payload"])
+
+    if not withdrawal or not sign_valid:
+        return
+
+    if event == "disbursement.success":
+        withdrawal.status = "COMPLETED"
+        withdrawal.save(update_fields=["status"])
+    elif event == "disbursement.failed":
+        # REJECTED memicu auto-refund di Withdrawal.save()
+        withdrawal.status = "REJECTED"
+        withdrawal.save(update_fields=["status"])
+    elif event == "disbursement.processing":
+        withdrawal.status = "PROCESSING"
+        withdrawal.save(update_fields=["status"])
+
+
+def _ffpay_payout_initiate(request, pk: int, wallet: str):
+    """Validasi + kirim payout FF Pay/LPAY/MGM untuk satu withdrawal."""
+    cfg = FFPAY_PAYOUT_WALLETS[wallet]
+    gs = WithdrawalSettings.objects.order_by("-updated_at").first()
+    enabled = bool(gs and getattr(gs, cfg["flag"], False))
+    api_url = (gs.ffpay_payout_api_url or "").strip() if gs else ""
+    api_key = (gs.ffpay_payout_api_key or "").strip() if gs else ""
+    secret_key = (gs.ffpay_payout_secret_key or "").strip() if gs else ""
+
+    if not enabled:
+        return Response({"detail": f"{cfg['label']} payout tidak aktif"}, status=status.HTTP_400_BAD_REQUEST)
+    if not api_url or not api_key or not secret_key:
+        return Response({"detail": f"Konfigurasi {cfg['label']} payout belum lengkap"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        wd = Withdrawal.objects.select_related("user", "bank_account__bank", "transaction").get(pk=pk)
+    except Withdrawal.DoesNotExist:
+        return Response({"detail": "Withdrawal tidak ditemukan"}, status=status.HTTP_404_NOT_FOUND)
+
+    if wd.status not in ("PENDING", "PROCESSING"):
+        return Response({"detail": "Status withdrawal tidak valid untuk inisiasi"}, status=status.HTTP_400_BAD_REQUEST)
+
+    bank = getattr(getattr(wd, "bank_account", None), "bank", None)
+    bank_code = ffpay_payout_bank_code(getattr(bank, "code", "") or "", wallet)
+    if not bank_code:
+        bank_label = getattr(bank, "name", "") or "Bank"
+        return Response(
+            {"detail": f"{bank_label} belum didukung untuk payout {cfg['label']}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    account_no = getattr(wd.bank_account, "account_number", "") or ""
+    account_name = getattr(wd.bank_account, "account_name", "") or ""
+
+    amount_raw = request.data.get("amount")
+    try:
+        amount = ppaypros_normalize_amount(amount_raw) if amount_raw is not None else ppaypros_normalize_amount(wd.net_amount or wd.amount)
+        if amount <= 0:
+            raise InvalidOperation()
+    except Exception:
+        return Response({"detail": "amount tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
+
+    amount_int = int(round(float(amount)))
+    if amount_int < FFPAY_PAYOUT_MIN_AMOUNT or amount_int > FFPAY_PAYOUT_MAX_AMOUNT:
+        return Response(
+            {"detail": f"Amount payout harus antara {FFPAY_PAYOUT_MIN_AMOUNT} dan {FFPAY_PAYOUT_MAX_AMOUNT} IDR"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if wallet in ("lpay", "mgm") and not account_name:
+        return Response(
+            {"detail": f"account_holder_name wajib diisi untuk payout {cfg['label']}"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    merchant_ref = getattr(getattr(wd, "transaction", None), "trx_id", None) or f"WFP{wd.pk}{int(pytime.time())}"
+
+    payload = {
+        "amount": amount_int,
+        "destination_account": account_no,
+        "bank_code": bank_code,
+        "account_holder_name": (account_name or "")[:100],
+        "merchant_ref": merchant_ref,
+    }
+    if wallet == "lpay":
+        code = (request.data.get("code") or "").strip()
+        if code:
+            payload["code"] = code[:32]
+    description = (request.data.get("description") or "").strip()
+    if description and wallet in ("lpay", "mgm"):
+        payload["description"] = description[:100]
+
+    trace, _ = FfpayWithdrawal.objects.get_or_create(
+        withdrawal=wd, defaults={"wallet": wallet, "request_params": payload}
+    )
+    if trace and (not trace.request_params or trace.wallet != wallet):
+        trace.wallet = wallet
+        trace.request_params = payload
+        trace.save(update_fields=["wallet", "request_params"])
+
+    resp_data, _http_status = reepay_post_json(
+        api_key, secret_key, cfg["path"], payload, base_url=api_url
+    )
+
+    if trace:
+        stored = trace.response_payload if isinstance(trace.response_payload, dict) else {}
+        stored["initiate"] = resp_data
+        trace.response_payload = stored
+        trace.save(update_fields=["response_payload"])
+
+    if resp_data.get("success"):
+        data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+        ref_id = (data.get("ref_id") or "").strip()
+        provider_status = str(data.get("status") or "").strip()
+        if ref_id:
+            note = f"{cfg['label']} ref_id: {ref_id}"
+            wd.note = f"{note}\n{wd.note}" if wd.note else note
+            wd.save(update_fields=["note"])
+        # status provider: processing / awaiting_approval (>5jt menunggu approve platform)
+        wd.status = "PROCESSING"
+        wd.save(update_fields=["status"])
+        return Response(
+            {"ref_id": ref_id, "status": provider_status or "processing", "provider": resp_data},
+            status=status.HTTP_200_OK,
+        )
+
+    detail_msg = (
+        resp_data.get("message")
+        or resp_data.get("detail")
+        or resp_data.get("msg")
+        or f"{cfg['label']} payout gagal"
+    )
+    return Response({"detail": detail_msg, "provider": resp_data}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class _FfpayPayoutInitiateBase(APIView):
+    permission_classes = [permissions.IsAdminUser]
+    throttle_scope = "withdraw_admin_initiate"
+
+    wallet = "ffpay"
+
+    @extend_schema(summary="Inisiasi withdraw via FF Pay / LPAY / MGM (admin)")
+    def post(self, request, pk: int):
+        return _ffpay_payout_initiate(request, pk, self.wallet)
+
+
+class FfpayPayoutInitiateView(_FfpayPayoutInitiateBase):
+    wallet = "ffpay"
+
+
+class LpayPayoutInitiateView(_FfpayPayoutInitiateBase):
+    wallet = "lpay"
+
+
+class MgmPayoutInitiateView(_FfpayPayoutInitiateBase):
+    wallet = "mgm"
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class FfpayPayoutCallbackView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "gateway_callback"
+
+    @extend_schema(summary="Callback FF Pay / LPAY / MGM untuk update status withdraw")
+    def post(self, request):
+        payload = _reepay_withdraw_callback_payload(request)
+        _ffpay_handle_withdraw_callback(request, payload)
         return HttpResponse("OK", content_type="text/plain")

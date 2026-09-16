@@ -464,4 +464,67 @@
       <p style="color: #999;">Reepay payout tidak aktif. Aktifkan di WithdrawalSettings dan isi konfigurasi api_key/secret_key.</p>
     {% endif %}
   </div>
+
+  <!-- FF Pay / LPAY / MGM Payout Section -->
+  <div class="module" style="margin-top: 30px; border: 1px solid #ccc; border-radius: 5px; padding: 20px;">
+    <h2>Process via FF Pay / LPAY / MGM</h2>
+    {% if ffpay_payout_enabled %}
+      <form method="post" action="{{ process_ffpay_url }}">
+        {% csrf_token %}
+        <fieldset class="module aligned">
+          <div class="form-row">
+            <div>
+              <label for="id_fp_wallet">Wallet</label>
+              <select id="id_fp_wallet" name="wallet">
+                {% for w in ffpay_wallets %}
+                  <option value="{{ w.value }}" {% if ffpay_payout_initial.wallet == w.value %}selected{% endif %} {% if not w.enabled %}disabled{% endif %}>
+                    {{ w.label }}{% if not w.enabled %} (tidak aktif){% endif %}
+                  </option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label>Bank</label>
+              <p style="margin: 0; padding-top: 6px;">
+                {{ ffpay_payout_initial.bank_name }} ({{ ffpay_payout_initial.bank_code }}) —
+                FF Pay: <code>{{ ffpay_payout_initial.bank_code_ffpay|default:"-" }}</code> ·
+                LPAY: <code>{{ ffpay_payout_initial.bank_code_lpay|default:"-" }}</code> ·
+                MGM: <code>{{ ffpay_payout_initial.bank_code_mgm|default:"-" }}</code>
+              </p>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_fp_destination_account">Account Number</label>
+              <input type="text" id="id_fp_destination_account" name="destination_account" value="{{ ffpay_payout_initial.destination_account }}" required />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_fp_account_holder_name">Account Holder Name</label>
+              <input type="text" id="id_fp_account_holder_name" name="account_holder_name" value="{{ ffpay_payout_initial.account_holder_name }}" />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_fp_amount">Amount</label>
+              <input type="number" step="1" id="id_fp_amount" name="amount" value="{{ ffpay_payout_initial.amount }}" required />
+            </div>
+          </div>
+        </fieldset>
+
+        <div class="submit-row">
+          <button type="submit" class="default">Submit to FF Pay</button>
+        </div>
+      </form>
+    {% else %}
+      <p style="color: #999;">FF Pay / LPAY / MGM payout tidak aktif. Aktifkan di WithdrawalSettings dan isi konfigurasi api_key/secret_key.</p>
+    {% endif %}
+  </div>
 {% endblock %}

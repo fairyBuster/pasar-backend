@@ -112,6 +112,23 @@ class GatewaySettings(models.Model):
     reepay_secret_key = models.CharField(max_length=255, blank=True, default='', help_text='Secret key untuk HMAC-SHA256 signature')
     reepay_return_url = models.CharField(max_length=512, blank=True, default='', help_text='URL redirect setelah pembayaran selesai (opsional)')
 
+    # FF Pay / LPAY / MGM pay-in (satu platform, kredensial sama)
+    ffpay_enabled = models.BooleanField(default=False)
+    lpay_enabled = models.BooleanField(default=False)
+    mgm_enabled = models.BooleanField(default=False)
+    ffpay_api_url = models.CharField(max_length=255, blank=True, default='', help_text='Base URL FF Pay, contoh: https://api.contoh.com (tanpa trailing slash)')
+    ffpay_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
+    ffpay_secret_key = models.TextField(blank=True, default='', help_text='Secret key HMAC-SHA256 (bisa >255 karakter, jangan dipotong)')
+    ffpay_return_url = models.CharField(max_length=512, blank=True, default='', help_text='URL redirect setelah pembayaran selesai (opsional)')
+    lpay_code = models.CharField(max_length=32, blank=True, default='3560', help_text='Kode channel LPAY, contoh: 3560 (QRIS)')
+    mgm_method = models.CharField(max_length=16, blank=True, default='QRCODE', help_text='Metode MGM: QRCODE (QRIS) atau WALLET (e-wallet)')
+
+    # QuenPay (Quen Payment) QRIS Pay-In - signed request HMAC-SHA256
+    quenpay_enabled = models.BooleanField(default=False)
+    quenpay_api_url = models.CharField(max_length=255, blank=True, default='', help_text='Host base URL QuenPay (contoh https://quenpayment.com), tanpa /api/v1')
+    quenpay_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-Quen-Api-Key merchant dari halaman API & Callback')
+    quenpay_secret_key = models.CharField(max_length=512, blank=True, default='', help_text='API Secret untuk HMAC-SHA256 (canonical string request & callback)')
+
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -240,6 +257,10 @@ class Deposit(models.Model):
         ('BANKPAY', 'BankPay'),
         ('QRIS', 'QRIS Manual'),
         ('REEPAY', 'Reepay'),
+        ('FFPAY', 'FF Pay'),
+        ('LPAY', 'LPAY'),
+        ('MGM', 'MGM Pay'),
+        ('QUENPAY', 'QuenPay'),
     ]
     WALLET_CHOICES = [
         ('BALANCE', 'Balance'),

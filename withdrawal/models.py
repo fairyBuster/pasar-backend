@@ -65,6 +65,13 @@ class WithdrawalSettings(models.Model):
     reepay_payout_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
     reepay_payout_secret_key = models.CharField(max_length=255, blank=True, default='', help_text='Secret key untuk HMAC-SHA256 signature payout')
 
+    ffpay_payout_enabled = models.BooleanField(default=False, verbose_name='FF Pay payout')
+    lpay_payout_enabled = models.BooleanField(default=False, verbose_name='LPAY payout')
+    mgm_payout_enabled = models.BooleanField(default=False, verbose_name='MGM payout')
+    ffpay_payout_api_url = models.CharField(max_length=255, blank=True, default='', help_text='Base URL FF Pay (dipakai FF Pay/LPAY/MGM), contoh: https://api.contoh.com')
+    ffpay_payout_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
+    ffpay_payout_secret_key = models.TextField(blank=True, default='', help_text='Secret key HMAC-SHA256 (bisa >255 karakter, jangan dipotong)')
+
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -293,3 +300,25 @@ class ReepayWithdrawal(models.Model):
 
     def __str__(self):
         return f"Reepay payout for Withdrawal #{self.withdrawal.pk}"
+
+
+class FfpayWithdrawal(models.Model):
+    WALLET_CHOICES = [
+        ('ffpay', 'FF Pay'),
+        ('lpay', 'LPAY'),
+        ('mgm', 'MGM'),
+    ]
+
+    withdrawal = models.OneToOneField(Withdrawal, on_delete=models.CASCADE, related_name='ffpay_withdrawal')
+    wallet = models.CharField(max_length=10, choices=WALLET_CHOICES, default='ffpay')
+    request_params = models.JSONField(default=dict)
+    response_payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'withdrawal_ffpay'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"FF Pay/LPAY/MGM ({self.wallet}) payout for Withdrawal #{self.withdrawal.pk}"

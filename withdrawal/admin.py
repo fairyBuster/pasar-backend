@@ -3,7 +3,7 @@ from django.conf import settings
 from django.urls import path, reverse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
-from .models import Withdrawal, WithdrawalSettings, WithdrawalJayapay, WithdrawalService, UsdPayoutWithdrawal, JayapayPhPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal
+from .models import Withdrawal, WithdrawalSettings, WithdrawalJayapay, WithdrawalService, UsdPayoutWithdrawal, JayapayPhPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal, FfpayWithdrawal
 from .integrations.jayapay import build_params, sign_params, sign_params_legacy, send_cash_request
 from .integrations.jayapay_banks import JAYAPAY_BANKS
 from .integrations.jayapay_ph_banks import JAYAPAY_PH_PAYOUT_BANKS
@@ -14,6 +14,8 @@ from deposits.integrations.ppaypros import amount_to_points as ppaypros_amount_t
 from deposits.integrations.atpay import build_bank_code_payload as atpay_build_bank_code_payload, build_payout_payload as atpay_build_payout_payload, build_payout_query_payload as atpay_build_payout_query_payload, map_payout_trade_status as atpay_map_payout_trade_status, normalize_amount as atpay_normalize_amount, normalize_sign_type as atpay_normalize_sign_type, post_json as atpay_post_json, sign_payload as atpay_sign_payload, verify_payload as atpay_verify_payload
 from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign, post_form as bankpay_post_form, build_payout_payload as bankpay_build_payout_payload, fetch_bank_list as bankpay_fetch_bank_list
 from deposits.integrations.reepay import post_json as reepay_post_json
+from .integrations.ffpay import ffpay_payout_bank_code
+from .views import FFPAY_PAYOUT_WALLETS
 from django.utils.html import format_html
 import json
 import logging
@@ -206,6 +208,11 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 '<int:pk>/process-reepay/',
                 self.admin_site.admin_view(self.process_reepay_view),
                 name='withdrawal_withdrawal_process_reepay',
+            ),
+            path(
+                '<int:pk>/process-ffpay/',
+                self.admin_site.admin_view(self.process_ffpay_view),
+                name='withdrawal_withdrawal_process_ffpay',
             ),
         ]
         return custom + urls
@@ -972,6 +979,110 @@ class WithdrawalAdmin(admin.ModelAdmin):
 
         return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
+    def process_ffpay_view(self, request, pk: int):
+        try:
+            wd = Withdrawal.objects.select_related('bank_account__bank', 'user', 'transaction').get(pk=pk)
+        except Withdrawal.DoesNotExist:
+            self.message_user(request, 'Withdrawal tidak ditemukan', level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_changelist'))
+
+        gs = WithdrawalSettings.objects.order_by("-updated_at").first()
+        enabled_flags = {
+            wallet: bool(gs and getattr(gs, cfg["flag"], False))
+            for wallet, cfg in FFPAY_PAYOUT_WALLETS.items()
+        }
+        api_url = (gs.ffpay_payout_api_url or "").strip() if gs else ""
+        api_key = (gs.ffpay_payout_api_key or "").strip() if gs else ""
+        secret_key = (gs.ffpay_payout_secret_key or "").strip() if gs else ""
+
+        if request.method == "POST":
+            wallet = (request.POST.get("wallet") or "ffpay").strip().lower()
+            if wallet not in FFPAY_PAYOUT_WALLETS:
+                self.message_user(request, 'Wallet payout tidak valid', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+            label = FFPAY_PAYOUT_WALLETS[wallet]["label"]
+
+            if not enabled_flags[wallet]:
+                self.message_user(request, f'{label} payout tidak aktif', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+            if not api_url or not api_key or not secret_key:
+                self.message_user(request, 'Konfigurasi FF Pay payout belum lengkap', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            bank = getattr(getattr(wd, 'bank_account', None), 'bank', None)
+            bank_code = ffpay_payout_bank_code(getattr(bank, 'code', '') or '', wallet)
+            if not bank_code:
+                self.message_user(request, f'{getattr(bank, "name", "") or "Bank"} belum didukung untuk payout {label}', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            destination_account = (request.POST.get("destination_account") or (wd.bank_account.account_number if wd.bank_account else "")).strip()
+            account_holder_name = (request.POST.get("account_holder_name") or (wd.bank_account.account_name if wd.bank_account else "")).strip()
+            amount_raw = (request.POST.get("amount") or "").strip() or str(wd.net_amount or wd.amount)
+
+            if not destination_account or not amount_raw:
+                self.message_user(request, 'Account Number dan Amount wajib diisi', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+            if wallet in ('lpay', 'mgm') and not account_holder_name:
+                self.message_user(request, f'Account Holder Name wajib diisi untuk {label}', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            try:
+                amount = Decimal(str(amount_raw))
+                if amount <= 0:
+                    raise InvalidOperation()
+            except Exception:
+                self.message_user(request, 'Amount tidak valid', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            amount_int = int(round(float(amount)))
+            if amount_int < 10000 or amount_int > 50000000:
+                self.message_user(request, 'Amount payout harus antara 10000 dan 50000000 IDR', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            merchant_ref = wd.transaction.trx_id if wd.transaction else f"WFP{wd.id}{int(time.time())}"
+
+            payload = {
+                "amount": amount_int,
+                "destination_account": destination_account,
+                "bank_code": bank_code,
+                "account_holder_name": account_holder_name[:100],
+                "merchant_ref": merchant_ref,
+            }
+
+            trace, _ = FfpayWithdrawal.objects.get_or_create(
+                withdrawal=wd, defaults={"wallet": wallet, "request_params": payload}
+            )
+            if trace and (not trace.request_params or trace.wallet != wallet):
+                trace.wallet = wallet
+                trace.request_params = payload
+                trace.save(update_fields=["wallet", "request_params"])
+
+            resp_data, _ = reepay_post_json(api_key, secret_key, FFPAY_PAYOUT_WALLETS[wallet]["path"], payload, base_url=api_url)
+
+            if trace:
+                stored = trace.response_payload if isinstance(trace.response_payload, dict) else {}
+                stored["initiate"] = _redact_for_log(resp_data)
+                trace.response_payload = stored
+                trace.save(update_fields=["response_payload"])
+
+            if resp_data.get("success"):
+                data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+                ref_id = (data.get("ref_id") or "").strip()
+                if ref_id:
+                    note = f"{label} ref_id: {ref_id}"
+                    wd.note = f"{note}\n{wd.note}" if wd.note else note
+                    wd.save(update_fields=["note"])
+                wd.status = 'PROCESSING'
+                wd.save(update_fields=['status'])
+                self.message_user(request, f"Withdrawal #{wd.id} dikirim ke {label}", level=messages.SUCCESS)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            detail_msg = resp_data.get("message") or resp_data.get("detail") or resp_data.get("msg") or f"{label} payout gagal"
+            self.message_user(request, f"{label} gagal: {detail_msg}", level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+        return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
     def render_change_form(self, request, context, add=False, change=False, form_url='', obj=None):
         if obj:
             gs = WithdrawalSettings.objects.order_by("-updated_at").first()
@@ -1096,6 +1207,30 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     'amount': str(obj.net_amount or obj.amount),
                 },
                 'process_reepay_url': reverse('admin:withdrawal_withdrawal_process_reepay', args=(obj.id,)),
+                'ffpay_payout_enabled': any(bool(gs and getattr(gs, cfg["flag"], False)) for cfg in FFPAY_PAYOUT_WALLETS.values()),
+                'ffpay_wallets': [
+                    {
+                        "value": wallet,
+                        "label": cfg["label"],
+                        "enabled": bool(gs and getattr(gs, cfg["flag"], False)),
+                    }
+                    for wallet, cfg in FFPAY_PAYOUT_WALLETS.items()
+                ],
+                'ffpay_payout_initial': {
+                    'wallet': next(
+                        (w for w, c in FFPAY_PAYOUT_WALLETS.items() if gs and getattr(gs, c["flag"], False)),
+                        'ffpay',
+                    ),
+                    'bank_code': wd_bank_code,
+                    'bank_name': wd_bank_name,
+                    'bank_code_ffpay': ffpay_payout_bank_code(wd_bank_code, 'ffpay'),
+                    'bank_code_lpay': ffpay_payout_bank_code(wd_bank_code, 'lpay'),
+                    'bank_code_mgm': ffpay_payout_bank_code(wd_bank_code, 'mgm'),
+                    'destination_account': obj.bank_account.account_number if obj.bank_account else '',
+                    'account_holder_name': obj.bank_account.account_name if obj.bank_account else '',
+                    'amount': str(obj.net_amount or obj.amount),
+                },
+                'process_ffpay_url': reverse('admin:withdrawal_withdrawal_process_ffpay', args=(obj.id,)),
             })
         return super().render_change_form(request, context, add, change, form_url, obj)
 
@@ -1318,6 +1453,9 @@ class WithdrawalSettingsAdmin(admin.ModelAdmin):
         'atpay_payout_enabled',
         'bankpay_payout_enabled',
         'reepay_payout_enabled',
+        'ffpay_payout_enabled',
+        'lpay_payout_enabled',
+        'mgm_payout_enabled',
         'updated_at',
     )
     list_filter = ('is_active',)
@@ -1401,6 +1539,22 @@ class WithdrawalSettingsAdmin(admin.ModelAdmin):
                 'reepay_payout_api_url',
                 'reepay_payout_api_key',
                 'reepay_payout_secret_key',
+            )
+        }),
+        ('FF Pay Payout (FF Pay / LPAY / MGM)', {
+            'description': (
+                'Satu API key/secret FF Pay untuk ketiga wallet payout. Callback disbursement dikirim ke '
+                '`/api/withdrawals/ffpay/callback/` (atau `lpay`/`mgm` sesuai wallet), atau ke Payout Webhook URL FF Pay. '
+                'Bila Payout Webhook URL dikosongkan, event disbursement.* yang masuk ke URL collections '
+                '(`/api/deposits/ffpay/callback/`) otomatis diarahkan ke handler withdraw.'
+            ),
+            'fields': (
+                'ffpay_payout_enabled',
+                'lpay_payout_enabled',
+                'mgm_payout_enabled',
+                'ffpay_payout_api_url',
+                'ffpay_payout_api_key',
+                'ffpay_payout_secret_key',
             )
         }),
     )
