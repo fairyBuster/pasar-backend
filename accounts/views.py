@@ -1095,6 +1095,8 @@ class AccountInfoView(APIView):
                             'email': 'user@example.com',
                             'full_name': 'User Name',
                             'phone': '085112345678',
+                            'date_of_birth': '1995-08-17',
+                            'gender': 'male',
                             'balance': '1000.00',
                             'balance_deposit': '500.00',
                             'referral_by_username': 'referrer123',
@@ -1136,21 +1138,21 @@ class AccountInfoView(APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class ProfileUpdateView(APIView):
     """
-    Update user profile - full_name, username, telegram, email, date_of_birth, and gender
+    Update user profile - full_name, username, telegram, date_of_birth, and gender.
+    Email tidak bisa diubah lewat endpoint ini (hanya ikut tampil di response).
     """
     permission_classes = (IsAuthenticated,)
     serializer_class = ProfileUpdateSerializer
 
     @extend_schema(
-        description='Update user profile (full_name, username, telegram, email, date_of_birth, gender)',
+        description='Update user profile (full_name, username, telegram, date_of_birth, gender). Email tidak bisa diubah.',
         request={
             'application/json': {
                 'type': 'object',
                 'properties': {
-                    'full_name': {'type': 'string', 'description': 'Full name of the user'},
-                    'username': {'type': 'string', 'description': 'Username (must be unique)'},
+                    'full_name': {'type': 'string', 'description': 'Full name of the user (huruf, angka, spasi)'},
+                    'username': {'type': 'string', 'description': 'Username (huruf & angka, must be unique)'},
                     'telegram': {'type': 'string', 'description': 'Telegram username or contact'},
-                    'email': {'type': 'string', 'description': 'Email (must be unique)'},
                     'date_of_birth': {'type': 'string', 'format': 'date', 'description': 'Tanggal lahir (YYYY-MM-DD)'},
                     'gender': {'type': 'string', 'enum': ['male', 'female'], 'description': 'Jenis kelamin: male / female'}
                 }
@@ -1164,7 +1166,7 @@ class ProfileUpdateView(APIView):
                         'Success Response',
                         value={
                             'full_name': 'Updated Full Name',
-                            'username': 'updated_username',
+                            'username': 'newusername123',
                             'telegram': '@updated_telegram',
                             'email': 'user@example.com',
                             'date_of_birth': '1995-08-17',

@@ -16,7 +16,35 @@ USER_TAG = "User API"
 @extend_schema_view(
     list=extend_schema(tags=[USER_TAG], responses={200: OpenApiResponse(description="List ulasan")}),
     retrieve=extend_schema(tags=[USER_TAG], responses={200: OpenApiResponse(description="Detail ulasan")}),
-    create=extend_schema(tags=[USER_TAG], responses={201: ReviewSerializer}),
+    create=extend_schema(
+        tags=[USER_TAG],
+        request={
+            "multipart/form-data": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Isi ulasan (min 3, maks 2000 karakter)",
+                        "example": "Pelayanan sangat cepat, proses deposit lancar!",
+                    },
+                    "rating": {
+                        "type": "integer",
+                        "description": "Rating bintang 1-5 (wajib)",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "example": 5,
+                    },
+                    "images": {
+                        "type": "array",
+                        "description": "Wajib upload 1-5 gambar/screenshot (JPG/PNG/WEBP, maks 1MB per file)",
+                        "items": {"type": "string", "format": "binary"},
+                    },
+                },
+                "required": ["text", "rating", "images"],
+            }
+        },
+        responses={201: ReviewSerializer},
+    ),
 )
 class ReviewViewSet(
     mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.CreateModelMixin, viewsets.GenericViewSet

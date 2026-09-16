@@ -1,5 +1,6 @@
 from datetime import datetime, time, timedelta
 import os
+import re
 from PIL import Image
 from django.db import transaction
 from django.db.models import Sum, Count, Q
@@ -59,6 +60,18 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     def validate_phone(self, value):
         # Pass-through: jangan ubah nilai phone sama sekali
+        return value
+
+    def validate_username(self, value):
+        """Username hanya boleh huruf dan angka, tanpa spasi/simbol"""
+        if not re.fullmatch(r'[A-Za-z0-9]+', value or ''):
+            raise serializers.ValidationError("Username hanya boleh huruf dan angka.")
+        return value
+
+    def validate_full_name(self, value):
+        """Nama lengkap hanya boleh huruf, angka, dan spasi, tanpa simbol"""
+        if value and (not re.fullmatch(r'[A-Za-z0-9 ]+', value) or not value.strip()):
+            raise serializers.ValidationError("Nama lengkap hanya boleh huruf, angka, dan spasi.")
         return value
 
     def validate(self, attrs):
@@ -286,11 +299,11 @@ class AccountInfoSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'full_name', 'phone', 'telegram', 'avatar', 'balance', 
+        fields = ('id', 'username', 'email', 'full_name', 'phone', 'telegram', 'date_of_birth', 'gender', 'avatar', 'balance', 
                  'balance_deposit', 'balance_hold', 'balance_cashback', 'referral_by_username', 'referral_by_phone', 
                  'root_parent_username', 'root_parent_phone',
                  'referral_code', 'rank', 'rank_title', 'created_at', 'updated_at', 'ip_address', 'active_investments_count', 'total_claimed_profit')
-        read_only_fields = ('id', 'username', 'email', 'full_name', 'phone', 'telegram', 'balance', 
+        read_only_fields = ('id', 'username', 'email', 'full_name', 'phone', 'telegram', 'date_of_birth', 'gender', 'balance', 
                            'balance_deposit', 'balance_hold', 'balance_cashback', 'referral_by_username', 'referral_by_phone', 
                            'root_parent_username', 'root_parent_phone',
                            'referral_code', 'rank', 'rank_title', 'created_at', 'updated_at', 'active_investments_count', 'total_claimed_profit')
@@ -471,24 +484,27 @@ class AccountStatsSerializer(serializers.ModelSerializer):
         ]
 
 class ProfileUpdateSerializer(serializers.ModelSerializer):
-    """Serializer for updating user profile - full_name, username, telegram, email, date_of_birth, and gender"""
+    """Serializer for updating user profile - full_name, username, telegram, date_of_birth, and gender.
+    Email hanya ikut tampil di response, tidak bisa diubah lewat endpoint ini."""
     
     class Meta:
         model = User
         fields = ('full_name', 'username', 'telegram', 'email', 'date_of_birth', 'gender')
+        read_only_fields = ('email',)
     
     def validate_username(self, value):
-        """Validate that username is unique (excluding current user)"""
+        """Username hanya huruf & angka (tanpa spasi/simbol) dan unique selain user ini"""
+        if not re.fullmatch(r'[A-Za-z0-9]+', value or ''):
+            raise serializers.ValidationError("Username hanya boleh huruf dan angka.")
         user = self.instance
         if User.objects.filter(username=value).exclude(id=user.id).exists():
             raise serializers.ValidationError("Username sudah digunakan oleh user lain.")
         return value
 
-    def validate_email(self, value):
-        """Validate that email is unique (excluding current user)"""
-        user = self.instance
-        if User.objects.filter(email__iexact=value).exclude(id=user.id).exists():
-            raise serializers.ValidationError("Email sudah digunakan oleh user lain.")
+    def validate_full_name(self, value):
+        """Nama lengkap hanya boleh huruf, angka, dan spasi, tanpa simbol"""
+        if value and (not re.fullmatch(r'[A-Za-z0-9 ]+', value) or not value.strip()):
+            raise serializers.ValidationError("Nama lengkap hanya boleh huruf, angka, dan spasi.")
         return value
 
     def validate_date_of_birth(self, value):

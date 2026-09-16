@@ -8,13 +8,13 @@ class AttendanceSettingsAdmin(admin.ModelAdmin):
     form = AttendanceSettingsAdminForm
     list_display = (
         'id', 'balance_source', 'reward_type', 'fixed_amount', 'min_amount', 'max_amount',
-        'consecutive_bonus_enabled', 'bonus_claim_separate_enabled', 'bonus_7_days', 'bonus_30_days', 'is_active', 'created_at'
+        'consecutive_bonus_enabled', 'bonus_claim_separate_enabled', 'bonus_7_days', 'bonus_30_days', 'calendar_enabled', 'is_active', 'created_at'
     )
 
     def has_add_permission(self, request):
         # Cukup satu konfigurasi, kalau sudah ada maka tidak bisa tambah baru
         return not AttendanceSettings.objects.exists()
-    list_filter = ('is_active', 'balance_source', 'reward_type', 'consecutive_bonus_enabled', 'bonus_claim_separate_enabled')
+    list_filter = ('is_active', 'calendar_enabled', 'balance_source', 'reward_type', 'consecutive_bonus_enabled', 'bonus_claim_separate_enabled')
     search_fields = ('id',)
     readonly_fields = ('created_at', 'updated_at')
 
@@ -89,7 +89,7 @@ class AttendanceSettingsAdmin(admin.ModelAdmin):
 
         fieldsets = (
             (None, {
-                'fields': ('balance_source', 'reward_type', 'is_active')
+                'fields': ('balance_source', 'reward_type', 'is_active', 'calendar_enabled')
             }),
             ('Base Reward', {
                 'fields': ('fixed_amount', 'min_amount', 'max_amount')

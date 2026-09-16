@@ -28,11 +28,14 @@ class RouletteSettingsAdmin(admin.ModelAdmin):
                     "grant_tickets_from_self_deposit",
                     "tickets_per_completed_deposit",
                     "min_deposit_amount_for_tickets",
+                    "deposit_ticket_multiple_amount",
                     "ticket_cost",
                 ),
                 "description": (
                     "Atur sumber tiket roulette. Bisa dari pembelian downline level-1 (upline dapat tiket) dan/atau dari deposit sendiri (user dapat tiket). "
-                    "Biaya spin memakai ticket_cost."
+                    "Biaya spin memakai ticket_cost. "
+                    "Mode kelipatan: isi 'Nominal kelipatan tiket deposit' (contoh 10000) + 'Tiket per deposit' (contoh 1) → deposit 20rb dapat 2 tiket, "
+                    "18rb/15rb dapat 1 tiket (dibulatkan ke bawah, sisa tidak diakumulasi). Kosongkan nominal kelipatan (0) untuk mode flat."
                 ),
             },
         ),
@@ -48,7 +51,7 @@ class RouletteSettingsAdmin(admin.ModelAdmin):
 
 @admin.register(RoulettePrize)
 class RoulettePrizeAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "prize_type", "amount", "weight", "is_active", "sort_order", "updated_at")
+    list_display = ("id", "name", "prize_type", "amount", "points_cost", "weight", "is_active", "sort_order", "updated_at")
     list_filter = ("is_active", "prize_type")
     search_fields = ("name",)
     readonly_fields = ("created_at", "updated_at")
@@ -57,14 +60,15 @@ class RoulettePrizeAdmin(admin.ModelAdmin):
             "Hadiah",
             {
                 "fields": ("name", "image", "description", "prize_type", "amount"),
-                "description": "Jika prize_type=NONE maka ini zonk. Jika BALANCE/BALANCE_DEPOSIT maka amount akan masuk ke wallet terkait.",
+                "description": "Jika prize_type=NONE maka ini zonk/hadiah fisik (mis. emas). Jika BALANCE/BALANCE_DEPOSIT maka amount akan masuk ke wallet terkait.",
             },
         ),
         (
             "Peluang Menang",
             {
                 "fields": ("weight", "is_active", "sort_order"),
-                "description": "Peluang = weight / total_weight (total_weight = jumlah weight hadiah aktif). Contoh: Zonk=90, Rp1000=10.",
+                "description": "Peluang = weight / total_weight (total_weight = jumlah weight hadiah aktif). Contoh: Zonk=90, Rp1000=10. "
+                "Menu ini khusus hadiah SPIN. Untuk hadiah tukar poin langsung, atur di section Redeem > Redeem prize catalog.",
             },
         ),
         ("Waktu", {"fields": ("created_at", "updated_at")}),

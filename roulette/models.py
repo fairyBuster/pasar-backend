@@ -22,13 +22,21 @@ class RouletteSettings(models.Model):
     )
     tickets_per_completed_deposit = models.PositiveIntegerField(
         default=0,
-        help_text="Jumlah tiket yang didapat user untuk setiap deposit COMPLETED (jika fitur deposit diaktifkan).",
+        help_text="Jumlah tiket yang didapat user untuk setiap deposit COMPLETED (jika fitur deposit diaktifkan). "
+        "Jika 'Nominal kelipatan tiket deposit' diisi, ini berarti tiket per kelipatan (contoh: kelipatan 10rb & 1 = tiap 10rb dapat 1 tiket).",
     )
     min_deposit_amount_for_tickets = models.DecimalField(
         max_digits=15,
         decimal_places=2,
         default=0,
         help_text="Minimum amount deposit agar dapat tiket (0 = tanpa minimum).",
+    )
+    deposit_ticket_multiple_amount = models.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        default=0,
+        help_text="Nominal kelipatan untuk tiket deposit (contoh: 10000). Tiket = floor(deposit / kelipatan) x tiket per deposit. "
+        "Contoh: kelipatan 10rb & 1 tiket → deposit 20rb = 2 tiket, 18rb/15rb = 1 tiket. Isi 0 = tanpa kelipatan (flat per deposit).",
     )
     ticket_cost = models.PositiveIntegerField(
         default=1,
@@ -78,6 +86,10 @@ class RoulettePrize(models.Model):
         default=0,
         help_text="Urutan tampilan hadiah di aplikasi (lebih kecil tampil lebih dulu).",
     )
+    points_cost = models.PositiveIntegerField(
+        default=0,
+        help_text="Harga poin/tiket untuk tukar langsung hadiah ini (0 = tidak bisa ditukar langsung).",
+    )
 
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -118,6 +130,7 @@ class RouletteTicketLedger(models.Model):
         ("LEVEL1_PURCHASE", "Level 1 Purchase"),
         ("SELF_DEPOSIT", "Self Deposit"),
         ("SPIN_COST", "Spin Cost"),
+        ("REDEEM", "Redeem Prize"),
         ("ADMIN_ADJUST", "Admin Adjust"),
     ]
 
@@ -184,3 +197,30 @@ class RouletteSpin(models.Model):
 
     def __str__(self):
         return f"{self.user_id} {self.prize_type} {self.prize_amount}"
+
+
+class RouletteRedemption(models.Model):
+    """Catatan penukaran poin/tiket roulette langsung ke hadiah (tanpa spin)."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="roulette_redemptions")
+    prize = models.ForeignKey(RoulettePrize, on_delete=models.SET_NULL, null=True, blank=True, related_name="redemptions")
+    prize_type = models.CharField(max_length=20, default="NONE")
+    prize_amount = models.DecimalField(max_digits=15, decimal_places=2, default="0.00")
+    points_spent = models.PositiveIntegerField(default=0, help_text="Jumlah poin/tiket yang dipakai.")
+    transaction = models.ForeignKey(
+        "products.Transaction",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="roulette_redemptions",
+    )
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        db_table = "roulette_redemptions"
+        ordering = ["-created_at", "-id"]
+        verbose_name = "Redeem Roulette"
+        verbose_name_plural = "Redeem Roulette"
+
+    def __str__(self):
+        return f"{self.user_id} {self.prize_id} (-{self.points_spent})"

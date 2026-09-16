@@ -213,11 +213,13 @@ class Transaction(models.Model):
         ('MISSIONS', 'Missions'),
         ('VOUCHER', 'Voucher'),
         ('ATTENDANCE', 'Attendance'),
+        ('REDEEM', 'Redeem'),
         ('CASHBACK', 'Cashback'),
         ('CASHBACK_DEPOSIT', 'Cashback Deposit'),
         ('REJECT', 'Reject'),
         ('RETURN', 'Return'),
         ('HOLD_RELEASE', 'Hold Release'),
+        ('SWAP', 'Swap'),
     ]
     
     STATUS_CHOICES = [

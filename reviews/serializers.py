@@ -54,6 +54,7 @@ class ReviewSerializer(serializers.ModelSerializer):
             "id",
             "user_display_name",
             "text",
+            "rating",
             "images",
             "likes_count",
             "is_liked",
@@ -77,10 +78,21 @@ class ReviewSerializer(serializers.ModelSerializer):
 
 class ReviewCreateSerializer(serializers.ModelSerializer):
     images = MultiImageField(write_only=True, allow_empty=False, required=True)
+    rating = serializers.IntegerField(
+        min_value=1,
+        max_value=5,
+        required=True,
+        error_messages={
+            "required": "Rating bintang wajib diisi (1-5).",
+            "invalid": "Rating bintang harus berupa angka 1-5.",
+            "min_value": "Rating bintang minimal 1.",
+            "max_value": "Rating bintang maksimal 5.",
+        },
+    )
 
     class Meta:
         model = Review
-        fields = ["id", "text", "images", "created_at"]
+        fields = ["id", "text", "rating", "images", "created_at"]
         read_only_fields = ["id", "created_at"]
 
     def validate_text(self, value: str) -> str:

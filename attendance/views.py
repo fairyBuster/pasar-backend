@@ -2,7 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework.decorators import action
-from drf_spectacular.utils import extend_schema, OpenApiResponse, inline_serializer
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiParameter, inline_serializer
 from rest_framework import serializers
 from django.db import transaction, connection, IntegrityError
 from django.db.models import Count, Sum
@@ -15,6 +15,8 @@ from products.models import Transaction
 import uuid
 from .serializers import AttendanceSettingsSerializer, AttendanceLogSerializer
 from zoneinfo import ZoneInfo
+from datetime import date
+from calendar import monthrange
 
 
 USER_TAG = "User API"
@@ -128,6 +130,23 @@ def _iter_dates(start_date, end_date):
     while cur <= end_date:
         yield cur
         cur = cur + timezone.timedelta(days=1)
+
+
+def _consecutive_streak(user, today):
+    """Current streak beruntun: hitung mundur dari hari ini, atau kemarin bila belum absen hari ini.
+    Bolong 1 hari+ dan belum absen lagi -> 0; setelah absen lagi -> 1. Lintas bulan tetap dihitung."""
+    attended = set(AttendanceLog.objects.filter(user=user).values_list('date', flat=True))
+    if today in attended:
+        cursor = today
+    elif (today - timezone.timedelta(days=1)) in attended:
+        cursor = today - timezone.timedelta(days=1)
+    else:
+        return 0
+    count = 0
+    while cursor in attended:
+        count += 1
+        cursor = cursor - timezone.timedelta(days=1)
+    return count
 
 
 class AttendanceSettingsViewSet(viewsets.ModelViewSet):
@@ -298,6 +317,102 @@ class AttendanceLogViewSet(viewsets.ReadOnlyModelViewSet):
             'missed_claim_dates': missed_claim_dates,
             'total_claimed_amount': aggregate_data.get('total_claimed_amount') or Decimal('0.00'),
             'total_claim_count': int(aggregate_data.get('total_claim_count') or 0),
+        })
+
+    @extend_schema(
+        tags=[USER_TAG],
+        parameters=[
+            OpenApiParameter(name='year', type=int, description='Tahun (default: tahun saat ini WIB)', required=False),
+            OpenApiParameter(name='month', type=int, description='Bulan 1-12 (default: bulan saat ini WIB)', required=False),
+        ],
+        responses={
+            200: OpenApiResponse(
+                response=inline_serializer(
+                    name='AttendanceCalendarResponse',
+                    fields={
+                        'year': serializers.IntegerField(),
+                        'month': serializers.IntegerField(),
+                        'today': serializers.DateField(),
+                        'attended_dates': serializers.ListField(child=serializers.DateField()),
+                        'missed_dates': serializers.ListField(child=serializers.DateField()),
+                        'attended_count': serializers.IntegerField(),
+                        'missed_count': serializers.IntegerField(),
+                        'streak': serializers.IntegerField(),
+                        'has_claimed_today': serializers.BooleanField(),
+                        'can_claim_today': serializers.BooleanField(),
+                    },
+                ),
+                description='Kalender riwayat absen bulanan'
+            ),
+            400: OpenApiResponse(description='Fitur kalender tidak aktif / parameter tidak valid'),
+        },
+        description=(
+            'Kalender riwayat absen user per bulan (mengikuti tanggal server WIB). '
+            'attended_dates = tanggal hijau (sudah absen), missed_dates = tanggal merah (terlewat: sebelum hari ini dan tidak absen), '
+            'tanggal setelah hari ini tidak dikirim (belum tersedia). Riwayat tidak pernah ter-reset. '
+            'Parameter year & month hanya untuk melihat bulan lain, tidak mengubah data absen. '
+            'Fitur ini bisa di on/off dari admin lewat field calendar_enabled di Attendance Settings.'
+        )
+    )
+    @action(detail=False, methods=['get'], url_path='calendar')
+    def calendar(self, request):
+        user = request.user
+        local_zone = ZoneInfo('Asia/Jakarta')
+        today = _now_in_zone(local_zone).date()
+
+        settings_obj = AttendanceSettings.objects.filter(is_active=True).order_by('-created_at').first()
+        if not settings_obj or not settings_obj.calendar_enabled:
+            return Response({'error': 'Fitur kalender absen tidak aktif.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_year = request.query_params.get('year')
+        raw_month = request.query_params.get('month')
+        try:
+            year = int(raw_year) if raw_year not in (None, '') else today.year
+            month = int(raw_month) if raw_month not in (None, '') else today.month
+        except (TypeError, ValueError):
+            return Response({'error': 'Parameter year/month tidak valid.'}, status=status.HTTP_400_BAD_REQUEST)
+        if month < 1 or month > 12 or year < 2000 or year > 2100:
+            return Response({'error': 'Parameter year/month tidak valid.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        month_start = date(year, month, 1)
+        month_end = date(year, month, monthrange(year, month)[1])
+
+        logs_in_month = AttendanceLog.objects.filter(
+            user=user, date__gte=month_start, date__lte=month_end
+        )
+        attended_dates = sorted(logs_in_month.values_list('date', flat=True))
+
+        # Tanggal merah (terlewat): sebelum hari ini & tidak absen.
+        # Dimulai dari absen pertama user agar hari sebelum user mulai tidak ikut merah.
+        range_start = month_start
+        first_log = AttendanceLog.objects.filter(user=user).order_by('date').first()
+        if first_log and first_log.date > range_start:
+            range_start = first_log.date
+        range_end = today - timezone.timedelta(days=1)
+        if range_end > month_end:
+            range_end = month_end
+        missed_dates = []
+        if range_start <= range_end:
+            attended_set = set(attended_dates)
+            missed_dates = [d for d in _iter_dates(range_start, range_end) if d not in attended_set]
+
+        has_claimed_today = AttendanceLog.objects.filter(user=user, date=today).exists()
+        can_claim_today = not has_claimed_today
+        if settings_obj.reward_type == 'daily':
+            daily_state = _get_daily_program_state(user, today)
+            can_claim_today = (not has_claimed_today) and (not daily_state['program_completed'])
+
+        return Response({
+            'year': year,
+            'month': month,
+            'today': today,
+            'attended_dates': attended_dates,
+            'missed_dates': missed_dates,
+            'attended_count': len(attended_dates),
+            'missed_count': len(missed_dates),
+            'streak': _consecutive_streak(user, today),
+            'has_claimed_today': has_claimed_today,
+            'can_claim_today': can_claim_today,
         })
 
     @extend_schema(

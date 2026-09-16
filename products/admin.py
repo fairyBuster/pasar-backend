@@ -348,7 +348,9 @@ class TransactionAdmin(admin.ModelAdmin):
             'PURCHASE_COMMISSION': '#28a745',  # Green for purchase commission
             'PROFIT_COMMISSION': '#17a2b8',  # Teal for profit commission
             'INTEREST': '#17a2b8',  # Teal for interest (same as profit commission)
-            'ATTENDANCE': '#007cba'  # Treat attendance as credit-style
+            'ATTENDANCE': '#007cba',  # Treat attendance as credit-style
+            'REDEEM': '#9c27b0'  # Purple for prize redemption
+            , 'SWAP': '#ff9800'  # Orange for gold swap
         }
         color = colors.get(obj.type.upper(), '#6c757d')  # Default gray
         return format_html('<span style="color: {color}; font-weight: bold;">{type}</span>', 
@@ -358,7 +360,7 @@ class TransactionAdmin(admin.ModelAdmin):
     def amount_display(self, obj):
         # Check transaction type for color and prefix
         t = obj.type.upper()
-        if t in ['CREDIT', 'BONUS', 'PURCHASE_COMMISSION', 'PROFIT_COMMISSION', 'INTEREST', 'ATTENDANCE', 'VOUCHER','MISSIONS','DEPOSIT','CASHBACK', 'REJECT', 'RETURN']:
+        if t in ['CREDIT', 'BONUS', 'PURCHASE_COMMISSION', 'PROFIT_COMMISSION', 'INTEREST', 'ATTENDANCE', 'REDEEM', 'VOUCHER','MISSIONS','DEPOSIT','CASHBACK', 'REJECT', 'RETURN']:
             if t in ['CREDIT', 'BONUS']:
                 color = '#007cba'  # Blue for credit
             elif t == 'PURCHASE_COMMISSION':

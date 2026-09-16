@@ -4,14 +4,55 @@ import uuid
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Q, Sum
 from django.utils import timezone
 
 from products.models import Transaction
-from .models import RouletteSettings, RoulettePrize, RouletteTicketWallet, RouletteTicketLedger, RouletteSpin
+from .models import RouletteSettings, RoulettePrize, RouletteTicketWallet, RouletteTicketLedger, RouletteSpin, RouletteRedemption
 
 
 def get_settings():
     return RouletteSettings.objects.order_by("-updated_at").first()
+
+
+def get_points_summary(user):
+    """Ringkasan total poin/tiket user: saldo, akumulasi masuk/keluar, dan breakdown sumbernya."""
+    wallet = RouletteTicketWallet.objects.filter(user=user).first()
+    tickets = int(getattr(wallet, "balance", 0) or 0)
+
+    agg = RouletteTicketLedger.objects.filter(user=user).aggregate(
+        total_earned=Sum("delta", filter=Q(delta__gt=0)),
+        total_spent=Sum("delta", filter=Q(delta__lt=0)),
+        earned_level1=Sum("delta", filter=Q(reason="LEVEL1_PURCHASE", delta__gt=0)),
+        earned_deposit=Sum("delta", filter=Q(reason="SELF_DEPOSIT", delta__gt=0)),
+        earned_admin=Sum("delta", filter=Q(reason="ADMIN_ADJUST", delta__gt=0)),
+        spent_spin=Sum("delta", filter=Q(reason="SPIN_COST", delta__lt=0)),
+        spent_redeem=Sum("delta", filter=Q(reason="REDEEM", delta__lt=0)),
+        spent_admin=Sum("delta", filter=Q(reason="ADMIN_ADJUST", delta__lt=0)),
+    )
+
+    settings_obj = get_settings()
+    ticket_cost = int(getattr(settings_obj, "ticket_cost", 1) or 1) if settings_obj else 1
+
+    return {
+        "tickets": tickets,
+        "total_earned": int(agg.get("total_earned") or 0),
+        "total_spent": abs(int(agg.get("total_spent") or 0)),
+        "earned_breakdown": {
+            "level1_purchase": int(agg.get("earned_level1") or 0),
+            "self_deposit": int(agg.get("earned_deposit") or 0),
+            "admin_adjust": int(agg.get("earned_admin") or 0),
+        },
+        "spent_breakdown": {
+            "spin": abs(int(agg.get("spent_spin") or 0)),
+            "redeem": abs(int(agg.get("spent_redeem") or 0)),
+            "admin_adjust": abs(int(agg.get("spent_admin") or 0)),
+        },
+        "ticket_cost": ticket_cost,
+        "spins_available": tickets // ticket_cost if ticket_cost > 0 else None,
+        "total_spins": RouletteSpin.objects.filter(user=user).count(),
+        "total_redeems": RouletteRedemption.objects.filter(user=user).count(),
+    }
 
 
 def _get_or_create_wallet_for_update(user):
@@ -76,6 +117,13 @@ def grant_tickets_for_self_deposit(user, deposit_transaction, deposit_amount=Non
             amount_val = Decimal("0")
     if min_amount > 0 and amount_val < min_amount:
         return 0
+
+    multiple_amount = Decimal(str(getattr(settings_obj, "deposit_ticket_multiple_amount", 0) or 0))
+    if multiple_amount > 0:
+        units = int(amount_val // multiple_amount)
+        if units <= 0:
+            return 0
+        tickets = units * tickets
 
     if RouletteTicketLedger.objects.filter(
         reason="SELF_DEPOSIT",
@@ -202,4 +250,95 @@ def spin(user):
         "prize_type": spin_row.prize_type,
         "prize_amount": str(spin_row.prize_amount),
         "transaction_id": trx.trx_id if trx else None,
+    }
+
+
+def redeem_prize(user, prize):
+    """Tukar poin/tiket roulette langsung ke hadiah tanpa spin.
+
+    Hadiah fisik (prize_type NONE) tidak mengkredit saldo, tapi tetap dicatat
+    di RouletteRedemption + Transaction BONUS sebagai bukti penukaran.
+    """
+    settings_obj = get_settings()
+    if not settings_obj or not settings_obj.is_active:
+        raise ValueError("Roulette tidak aktif.")
+    if not prize or not prize.is_active:
+        raise ValueError("Hadiah tidak tersedia.")
+
+    points_cost = int(prize.points_cost or 0)
+    if points_cost <= 0:
+        raise ValueError("Hadiah ini tidak bisa ditukar dengan poin.")
+
+    prize_type = prize.prize_type
+    prize_amount = Decimal(str(prize.amount or 0)).quantize(Decimal("0.01"))
+    if prize_type in ("BALANCE", "BALANCE_DEPOSIT") and prize_amount <= 0:
+        prize_type = "NONE"
+        prize_amount = Decimal("0.00")
+
+    User = get_user_model()
+    with transaction.atomic():
+        user_locked = User.objects.select_for_update().get(id=user.id)
+        wallet = _get_or_create_wallet_for_update(user_locked)
+        before = int(wallet.balance or 0)
+        if before < points_cost:
+            raise ValueError("Poin/tiket tidak cukup.")
+
+        wallet.balance = before - points_cost
+        wallet.save(update_fields=["balance", "updated_at"])
+
+        if prize_type in ("BALANCE", "BALANCE_DEPOSIT") and prize_amount > 0:
+            if prize_type == "BALANCE":
+                balance_field = "balance"
+                wallet_type = "BALANCE"
+            else:
+                balance_field = "balance_deposit"
+                wallet_type = "BALANCE_DEPOSIT"
+
+            current = getattr(user_locked, balance_field)
+            setattr(user_locked, balance_field, current + prize_amount)
+            user_locked.save(update_fields=[balance_field])
+        else:
+            # Hadiah fisik (misal emas): tidak credit saldo, tetap dicatat sebagai bukti.
+            wallet_type = "BALANCE"
+
+        trx_id = f"RDM-{timezone.now().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
+        trx = Transaction.objects.create(
+            user=user_locked,
+            product=None,
+            upline_user=None,
+            trx_id=trx_id,
+            type="REDEEM",
+            amount=prize_amount,
+            description=f"Roulette prize redemption: {prize.name} ({points_cost} points)",
+            status="COMPLETED",
+            wallet_type=wallet_type,
+        )
+
+        RouletteTicketLedger.objects.create(
+            user=user_locked,
+            delta=-points_cost,
+            reason="REDEEM",
+            source_transaction=trx,
+        )
+
+        redemption = RouletteRedemption.objects.create(
+            user=user_locked,
+            prize=prize,
+            prize_type=prize_type,
+            prize_amount=prize_amount,
+            points_spent=points_cost,
+            transaction=trx,
+        )
+
+        after = int(wallet.balance or 0)
+
+    return {
+        "tickets_before": before,
+        "tickets_after": after,
+        "prize": prize,
+        "prize_type": redemption.prize_type,
+        "prize_amount": str(redemption.prize_amount),
+        "points_spent": points_cost,
+        "transaction_id": trx.trx_id if trx else None,
+        "redemption_id": redemption.id,
     }

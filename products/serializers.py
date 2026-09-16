@@ -86,9 +86,13 @@ class TransactionSerializer(serializers.ModelSerializer):
     withdrawal_service_fee_fixed = serializers.SerializerMethodField()
     voucher = serializers.SerializerMethodField()
     investment_status = serializers.SerializerMethodField()
+    profit_method = serializers.SerializerMethodField()
+    redeem_prize_name = serializers.SerializerMethodField()
+    redeem_points_spent = serializers.SerializerMethodField()
     withdrawal_id = serializers.SerializerMethodField()
     withdrawal_fee = serializers.SerializerMethodField()
     withdrawal_net_amount = serializers.SerializerMethodField()
+    gold_order_id = serializers.SerializerMethodField()
     
     class Meta:
         model = Transaction
@@ -123,6 +127,42 @@ class TransactionSerializer(serializers.ModelSerializer):
             return investment.status if investment else None
         except Exception:
             return None
+
+    def get_profit_method(self, obj):
+        """Metode pemrosesan profit untuk transaksi INTEREST:
+        'auto' / 'hold' = diproses otomatis oleh scheduler, 'manual' = diklaim user.
+        None untuk type transaksi lainnya."""
+        if obj.type != 'INTEREST':
+            return None
+        trx_id = obj.trx_id or ''
+        if trx_id.startswith('AUTO-'):
+            return 'hold' if (obj.wallet_type or '').upper() == 'BALANCE_HOLD' else 'auto'
+        if trx_id.startswith('CLM-'):
+            return 'manual'
+        return None
+
+    def _get_redemption(self, obj):
+        """Ambil record RouletteRedemption untuk transaksi type REDEEM."""
+        if obj.type != 'REDEEM':
+            return None
+        try:
+            from roulette.models import RouletteRedemption
+            return RouletteRedemption.objects.filter(transaction=obj).first()
+        except Exception:
+            return None
+
+    def get_redeem_prize_name(self, obj):
+        """Nama hadiah yang ditukar (untuk transaksi type REDEEM)."""
+        redemption = self._get_redemption(obj)
+        try:
+            return redemption.prize.name if redemption and redemption.prize else None
+        except Exception:
+            return None
+
+    def get_redeem_points_spent(self, obj):
+        """Jumlah poin/tiket yang dipakai untuk tukar hadiah (type REDEEM)."""
+        redemption = self._get_redemption(obj)
+        return int(redemption.points_spent) if redemption else None
 
     def get_transaction_id(self, obj):
         try:
@@ -291,6 +331,19 @@ class TransactionSerializer(serializers.ModelSerializer):
             wd = self._get_withdrawal(obj)
             if wd:
                 return str(wd.net_amount)
+        except Exception:
+            pass
+        return None
+
+    def get_gold_order_id(self, obj):
+        """Order tukar emas yang terkait baris SWAP (nilai emas dari
+        balance_hold atau biaya dari balance_deposit) — dipakai riwayat
+        untuk membuka detail pesanan cetak emas."""
+        try:
+            if obj.type == 'SWAP':
+                order = obj.gold_orders.first() or obj.gold_fee_orders.first()
+                if order:
+                    return order.pk
         except Exception:
             pass
         return None

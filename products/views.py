@@ -563,6 +563,8 @@ class TransactionViewSet(viewsets.ModelViewSet):
             'related_withdrawal__bank_account__bank',
             'related_withdrawal__withdrawal_service',
             'investment_set',
+            'gold_orders',
+            'gold_fee_orders',
         )
     
     def get_permissions(self):
@@ -596,11 +598,13 @@ class TransactionViewSet(viewsets.ModelViewSet):
                     'MISSIONS',
                     'VOUCHER',
                     'ATTENDANCE',
+                    'REDEEM',
                     'CASHBACK',
                     'CASHBACK_DEPOSIT',
                     'REJECT',
                     'RETURN',
                     'HOLD_RELEASE',
+                    'SWAP',
                 ],
                 description='Filter by transaction type',
                 required=False,

@@ -41,6 +41,12 @@ class AttendanceSettings(models.Model):
     # Status
     is_active = models.BooleanField(default=True)
 
+    # Kalender riwayat absen (bisa di on/off dari admin)
+    calendar_enabled = models.BooleanField(
+        default=True,
+        help_text='Jika OFF, endpoint kalender riwayat absen tidak bisa diakses user.',
+    )
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

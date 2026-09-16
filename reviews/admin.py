@@ -29,17 +29,26 @@ class ReviewImageInline(admin.TabularInline):
 
 @admin.register(Review)
 class ReviewAdmin(admin.ModelAdmin):
-    list_display = ["id", "image_preview", "user", "user_phone", "is_approved", "is_hidden", "created_at", "updated_at"]
-    list_filter = ["is_approved", "is_hidden", "created_at"]
+    list_display = ["id", "image_preview", "user", "user_phone", "rating_display", "is_approved", "is_hidden", "created_at", "updated_at"]
+    list_filter = ["rating", "is_approved", "is_hidden", "created_at"]
     search_fields = ["id", "user__id", "user__username", "user__full_name", "user__phone", "text"]
     inlines = [ReviewImageInline]
     actions = ["approve_reviews"]
     readonly_fields = ["review_images_preview", "user_phone", "created_at", "updated_at"]
     fieldsets = (
-        (None, {"fields": ("user", "user_phone", "text", "is_approved", "is_hidden")}),
+        (None, {"fields": ("user", "user_phone", "text", "rating", "is_approved", "is_hidden")}),
         ("Preview Gambar", {"fields": ("review_images_preview",)}),
         ("Timestamps", {"fields": ("created_at", "updated_at")}),
     )
+
+    def rating_display(self, obj):
+        if not obj:
+            return "-"
+        rating = int(obj.rating or 0)
+        stars = "\u2605" * rating + "\u2606" * (5 - rating)
+        return format_html('<span style="color: #f5a623; font-weight: bold;">{}</span>', stars)
+
+    rating_display.short_description = "Rating"
 
     def image_preview(self, obj):
         first_image = obj.images.first()

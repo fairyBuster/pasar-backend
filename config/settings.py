@@ -94,7 +94,9 @@ INSTALLED_APPS = [
     'support',
     'news',
     'roulette',
+    'redeem',
     'reviews',
+    'gold',
 ]
 
 MIDDLEWARE = [
