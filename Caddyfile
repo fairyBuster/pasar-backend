@@ -34,7 +34,7 @@
 
     handle_path /media/* {
         root * /app/media
-        header Cache-Control "public, max-age=31536000, immutable"
+        header Cache-Control "public, max-age=31536000"
         file_server
     }
 

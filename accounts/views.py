@@ -1219,7 +1219,7 @@ class ProfilePhotoUploadView(APIView):
 
     @extend_schema(
         tags=[USER_TAG],
-        description='Upload foto profil user. Mendukung JPG, JPEG, PNG (max 1MB).',
+        description='Upload foto profil user. Mendukung JPG, JPEG, PNG (max 2MB).',
         request={
             'multipart/form-data': {
                 'type': 'object',

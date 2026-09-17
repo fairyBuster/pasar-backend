@@ -850,10 +850,11 @@ class ProfilePhotoSerializer(serializers.Serializer):
             "PNG": {".png"},
         }
         allowed_content_types = {"image/jpeg", "image/png"}
-        max_bytes = 1 * 1024 * 1024  # 1MB
+        max_bytes = 2 * 1024 * 1024  # 2MB
+        max_pixels = 25_000_000  # batas anti decompression-bomb
 
         if getattr(value, "size", 0) > max_bytes:
-            raise serializers.ValidationError("Ukuran foto maksimal 1MB.")
+            raise serializers.ValidationError("Ukuran foto maksimal 2MB.")
 
         filename = (getattr(value, "name", "") or "").strip()
         extension = os.path.splitext(filename)[1].lower()
@@ -869,8 +870,13 @@ class ProfilePhotoSerializer(serializers.Serializer):
             img.verify()
             value.seek(0)
             img = Image.open(value)
+            width, height = img.size
+            if (width or 0) * (height or 0) > max_pixels:
+                raise serializers.ValidationError("Dimensi gambar terlalu besar (maks 25 megapiksel).")
             img.load()
             fmt = (img.format or "").upper()
+        except serializers.ValidationError:
+            raise
         except Exception:
             raise serializers.ValidationError("File gambar tidak valid.")
         finally:

@@ -1,8 +1,14 @@
+from io import BytesIO
+
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from PIL import Image
+from rest_framework import serializers
 from rest_framework.test import APIClient
 
 from accounts.models import GeneralSetting, RankLevel
+from accounts.serializers import ProfilePhotoSerializer
 from deposits.models import Deposit
 
 
@@ -266,3 +272,20 @@ class PublicSettingsOtpFlagTest(TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("otp_enabled", resp.data)
         self.assertEqual(resp.data["otp_enabled"], False)
+
+
+class ProfilePhotoValidationTest(TestCase):
+    """Validasi upload foto profil: decompression-bomb ditolak, PNG normal lolos."""
+
+    def _png(self, size):
+        buf = BytesIO()
+        Image.new("RGB", size, color=(120, 10, 10)).save(buf, format="PNG")
+        buf.seek(0)
+        return SimpleUploadedFile("foto.png", buf.read(), content_type="image/png")
+
+    def test_rejects_decompression_bomb(self):
+        with self.assertRaises(serializers.ValidationError):
+            ProfilePhotoSerializer().validate_avatar(self._png((5001, 5001)))
+
+    def test_accepts_normal_png(self):
+        ProfilePhotoSerializer().validate_avatar(self._png((64, 64)))

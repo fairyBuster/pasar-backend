@@ -14,7 +14,7 @@ from deposits.integrations.ppaypros import amount_to_points as ppaypros_amount_t
 from deposits.integrations.atpay import build_bank_code_payload as atpay_build_bank_code_payload, build_payout_payload as atpay_build_payout_payload, build_payout_query_payload as atpay_build_payout_query_payload, map_payout_trade_status as atpay_map_payout_trade_status, normalize_amount as atpay_normalize_amount, normalize_sign_type as atpay_normalize_sign_type, post_json as atpay_post_json, sign_payload as atpay_sign_payload, verify_payload as atpay_verify_payload
 from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign, post_form as bankpay_post_form, build_payout_payload as bankpay_build_payout_payload, fetch_bank_list as bankpay_fetch_bank_list
 from deposits.integrations.reepay import post_json as reepay_post_json
-from .integrations.ffpay import ffpay_payout_bank_code
+from .integrations.ffpay import FFPAY_POPULAR_BANKS, ffpay_payout_bank_code
 from .views import FFPAY_PAYOUT_WALLETS
 from django.utils.html import format_html
 import json
@@ -134,6 +134,17 @@ def _fetch_atpay_bank_codes(gs):
     except Exception as exc:
         logger.warning("Failed to fetch ATPAY bank codes: %s", exc, exc_info=True)
         return [], str(exc)
+
+
+def _ffpay_bank_option(code, name):
+    """Opsi picker bank admin FF Pay/LPAY/MGM: kode aplikasi + kode payout per wallet."""
+    return {
+        'code': code,
+        'name': name,
+        'ffpay': ffpay_payout_bank_code(code, 'ffpay'),
+        'lpay': ffpay_payout_bank_code(code, 'lpay'),
+        'mgm': ffpay_payout_bank_code(code, 'mgm'),
+    }
 
 
 @admin.register(Withdrawal)
@@ -1010,9 +1021,10 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
             bank = getattr(getattr(wd, 'bank_account', None), 'bank', None)
-            bank_code = ffpay_payout_bank_code(getattr(bank, 'code', '') or '', wallet)
+            bank_code_app = (request.POST.get("bank_code") or getattr(bank, 'code', '') or "").strip()
+            bank_code = ffpay_payout_bank_code(bank_code_app, wallet)
             if not bank_code:
-                self.message_user(request, f'{getattr(bank, "name", "") or "Bank"} belum didukung untuk payout {label}', level=messages.ERROR)
+                self.message_user(request, f'Bank {bank_code_app or "-"} belum didukung untuk payout {label}', level=messages.ERROR)
                 return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
             destination_account = (request.POST.get("destination_account") or (wd.bank_account.account_number if wd.bank_account else "")).strip()
@@ -1128,6 +1140,9 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 'accountName': obj.bank_account.account_name if obj.bank_account else '',
                 'amount': str(obj.net_amount or obj.amount),
             }
+            ffpay_bank_options = [_ffpay_bank_option(c, n) for c, n in FFPAY_POPULAR_BANKS]
+            if wd_bank_code and not any(o['code'] == wd_bank_code for o in ffpay_bank_options):
+                ffpay_bank_options.insert(0, _ffpay_bank_option(wd_bank_code, wd_bank_name or wd_bank_code))
             context.update({
                 'jayapay_initial': initial,
                 'jayapay_banks': JAYAPAY_BANKS,
@@ -1222,14 +1237,11 @@ class WithdrawalAdmin(admin.ModelAdmin):
                         'ffpay',
                     ),
                     'bank_code': wd_bank_code,
-                    'bank_name': wd_bank_name,
-                    'bank_code_ffpay': ffpay_payout_bank_code(wd_bank_code, 'ffpay'),
-                    'bank_code_lpay': ffpay_payout_bank_code(wd_bank_code, 'lpay'),
-                    'bank_code_mgm': ffpay_payout_bank_code(wd_bank_code, 'mgm'),
                     'destination_account': obj.bank_account.account_number if obj.bank_account else '',
                     'account_holder_name': obj.bank_account.account_name if obj.bank_account else '',
                     'amount': str(obj.net_amount or obj.amount),
                 },
+                'ffpay_bank_options': ffpay_bank_options,
                 'process_ffpay_url': reverse('admin:withdrawal_withdrawal_process_ffpay', args=(obj.id,)),
             })
         return super().render_change_form(request, context, add, change, form_url, obj)

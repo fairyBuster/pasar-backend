@@ -3,7 +3,8 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
+from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -241,3 +242,84 @@ class FfpayPayoutInitiateTest(TestCase):
         self.bank.save()
         resp = self.client.post(self._url("mgm"), {}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class FfpayAdminProcessOverrideTest(TestCase):
+    """Admin process form: bank pilihan admin menang atas bank user."""
+
+    def setUp(self):
+        self.client = Client()
+        User = get_user_model()
+        self.admin = User.objects.create(
+            username="ffpayadmpick",
+            phone="08123450124",
+            email="ffpayadmpick@example.com",
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.client.force_login(self.admin)
+        WithdrawalSettings.objects.create(
+            ffpay_payout_enabled=True,
+            lpay_payout_enabled=True,
+            mgm_payout_enabled=True,
+            ffpay_payout_api_url="https://api.ffpay.test",
+            ffpay_payout_api_key="ak_test",
+            ffpay_payout_secret_key=SECRET,
+        )
+        user = User.objects.create(
+            username="ffpaypickuser",
+            phone="08123450125",
+            email="ffpaypickuser@example.com",
+            balance=Decimal("0"),
+        )
+        bank = Bank.objects.create(code="10002", name="DANA")
+        user_bank = UserBank.objects.create(
+            user=user, bank=bank, account_name="Aqeela Calista", account_number="085641453156"
+        )
+        trx = Transaction.objects.create(
+            user=user,
+            type="WITHDRAW",
+            amount=Decimal("50000"),
+            currency_code="IDR",
+            status="PENDING",
+            wallet_type="BALANCE",
+            trx_id="WFP260917PICK01",
+            description="Withdraw test",
+        )
+        self.wd = Withdrawal.objects.create(
+            user=user,
+            bank_account=user_bank,
+            amount=Decimal("50000"),
+            net_amount=Decimal("44500"),
+            status="PENDING",
+            transaction=trx,
+        )
+
+    def test_admin_bank_picker_overrides_user_bank(self):
+        # Bank user DANA (10002), admin memilih Seabank (535) — kode kirim harus ikut pilihan admin.
+        url = reverse("admin:withdrawal_withdrawal_process_ffpay", args=[self.wd.pk])
+        fake = {"success": True, "data": {"ref_id": "WD260917PICK01"}}
+        cases = [("ffpay", "535"), ("lpay", "SEABANK"), ("mgm", "10535")]
+        for wallet, expected in cases:
+            with patch("withdrawal.admin.reepay_post_json", return_value=(fake, 200)) as mocked:
+                resp = self.client.post(url, {
+                    "wallet": wallet,
+                    "bank_code": "535",
+                    "destination_account": "085641453156",
+                    "account_holder_name": "Aqeela Calista",
+                    "amount": "44500",
+                })
+            self.assertEqual(resp.status_code, 302, wallet)
+            payload = mocked.call_args.args[3]
+            self.assertEqual(payload["bank_code"], expected, wallet)
+        self.wd.refresh_from_db()
+        self.assertEqual(self.wd.status, "PROCESSING")
+
+    def test_change_form_renders_bank_picker(self):
+        url = reverse("admin:withdrawal_withdrawal_change", args=[self.wd.pk])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, 'id="id_fp_bank"')
+        self.assertContains(resp, 'value="10002" selected')  # bank user DANA jadi default pilihan
+        self.assertContains(resp, 'data-mgm="10951"')  # kode MGM DANA tampil di opsi

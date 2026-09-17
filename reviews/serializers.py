@@ -120,6 +120,7 @@ class ReviewCreateSerializer(serializers.ModelSerializer):
         }
         allowed_content_types = {"image/jpeg", "image/png", "image/webp"}
         max_bytes = 1 * 1024 * 1024
+        max_pixels = 25_000_000  # batas anti decompression-bomb
 
         for f in images:
             if getattr(f, "size", 0) > max_bytes:
@@ -139,8 +140,13 @@ class ReviewCreateSerializer(serializers.ModelSerializer):
                 img.verify()
                 f.seek(0)
                 img = Image.open(f)
+                width, height = img.size
+                if (width or 0) * (height or 0) > max_pixels:
+                    raise serializers.ValidationError("Dimensi gambar terlalu besar (maks 25 megapiksel).")
                 img.load()
                 fmt = (img.format or "").upper()
+            except serializers.ValidationError:
+                raise
             except Exception:
                 raise serializers.ValidationError("File gambar tidak valid.")
             finally:

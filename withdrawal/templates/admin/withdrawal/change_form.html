@@ -487,13 +487,15 @@
 
           <div class="form-row">
             <div>
-              <label>Bank</label>
-              <p style="margin: 0; padding-top: 6px;">
-                {{ ffpay_payout_initial.bank_name }} ({{ ffpay_payout_initial.bank_code }}) —
-                FF Pay: <code>{{ ffpay_payout_initial.bank_code_ffpay|default:"-" }}</code> ·
-                LPAY: <code>{{ ffpay_payout_initial.bank_code_lpay|default:"-" }}</code> ·
-                MGM: <code>{{ ffpay_payout_initial.bank_code_mgm|default:"-" }}</code>
-              </p>
+              <label for="id_fp_bank">Bank</label>
+              <select id="id_fp_bank" name="bank_code">
+                {% for b in ffpay_bank_options %}
+                  <option value="{{ b.code }}" data-ffpay="{{ b.ffpay|default:'-' }}" data-lpay="{{ b.lpay|default:'-' }}" data-mgm="{{ b.mgm|default:'-' }}" {% if b.code == ffpay_payout_initial.bank_code %}selected{% endif %}>
+                    {{ b.name }} ({{ b.code }})
+                  </option>
+                {% endfor %}
+              </select>
+              <p id="id_fp_bank_hint" style="margin: 4px 0 0; color: #666;"></p>
             </div>
           </div>
 
@@ -523,6 +525,22 @@
           <button type="submit" class="default">Submit to FF Pay</button>
         </div>
       </form>
+      <script>
+        (function () {
+          var bank = document.getElementById('id_fp_bank');
+          var wallet = document.getElementById('id_fp_wallet');
+          var hint = document.getElementById('id_fp_bank_hint');
+          if (!bank || !wallet || !hint) return;
+          function refresh() {
+            var opt = bank.options[bank.selectedIndex];
+            var code = (opt && opt.dataset[wallet.value]) || '-';
+            hint.textContent = 'Kode payout ke provider: ' + code + (code === '-' ? ' (bank ini tidak didukung wallet tersebut)' : '');
+          }
+          bank.addEventListener('change', refresh);
+          wallet.addEventListener('change', refresh);
+          refresh();
+        })();
+      </script>
     {% else %}
       <p style="color: #999;">FF Pay / LPAY / MGM payout tidak aktif. Aktifkan di WithdrawalSettings dan isi konfigurasi api_key/secret_key.</p>
     {% endif %}

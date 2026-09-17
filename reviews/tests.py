@@ -2,7 +2,7 @@ from io import BytesIO
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from PIL import Image
 from rest_framework.test import APIClient
@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 from .models import Review
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class ReviewsApiTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -60,11 +61,39 @@ class ReviewsApiTest(TestCase):
         self.assertEqual(res.status_code, 400)
         self.assertIn("images", res.data)
 
+    def test_create_review_rejects_decompression_bomb(self):
+        buf = BytesIO()
+        Image.new("RGB", (5001, 5001), color=(120, 10, 10)).save(buf, format="PNG")
+        bomb = SimpleUploadedFile("bomb.png", buf.getvalue(), content_type="image/png")
+        res = self.client.post(
+            reverse("reviews:reviews-list"),
+            {"text": "review bomb", "images": [bomb]},
+            format="multipart",
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("images", res.data)
+
+    def test_create_review_sanitizes_script_in_text(self):
+        img = self._make_image()
+        res = self.client.post(
+            reverse("reviews:reviews-list"),
+            {
+                "text": "<script>alert(1)</script>Cepat & aman <b onmouseover=alert(2)>ok</b>",
+                "rating": 5,
+                "images": [img],
+            },
+            format="multipart",
+        )
+        self.assertEqual(res.status_code, 201)
+        stored = Review.objects.get(id=res.data["id"]).text
+        self.assertNotIn("<", stored)
+        self.assertNotIn("onmouseover", stored)
+
     def test_create_list_like_flow(self):
         img = self._make_image()
         res = self.client.post(
             reverse("reviews:reviews-list"),
-            {"text": "bagus sekali", "images": [img]},
+            {"text": "bagus sekali", "rating": 5, "images": [img]},
             format="multipart",
         )
         self.assertEqual(res.status_code, 201)
@@ -74,7 +103,7 @@ class ReviewsApiTest(TestCase):
 
         res_list = self.client.get(reverse("reviews:reviews-list"))
         self.assertEqual(res_list.status_code, 200)
-        self.assertEqual(res_list.data["count"], 0)
+        self.assertEqual(len(res_list.data), 0)
 
         res_detail = self.client.get(reverse("reviews:reviews-detail", args=[review_id]))
         self.assertEqual(res_detail.status_code, 404)
@@ -85,7 +114,7 @@ class ReviewsApiTest(TestCase):
 
         res_list = self.client.get(reverse("reviews:reviews-list"))
         self.assertEqual(res_list.status_code, 200)
-        self.assertGreaterEqual(res_list.data["count"], 1)
+        self.assertGreaterEqual(len(res_list.data), 1)
 
         res_detail = self.client.get(reverse("reviews:reviews-detail", args=[review_id]))
         self.assertEqual(res_detail.status_code, 200)

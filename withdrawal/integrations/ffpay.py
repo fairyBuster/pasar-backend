@@ -96,6 +96,28 @@ MGM_BANK_CODES = {
 }
 
 
+# Bank populer untuk picker admin "Process via FF Pay / LPAY / MGM" (kode aplikasi, nama tampilan).
+FFPAY_POPULAR_BANKS = [
+    ("014", "BCA"),
+    ("002", "BRI"),
+    ("008", "Mandiri"),
+    ("009", "BNI"),
+    ("4510", "BSI"),
+    ("022", "CIMB Niaga"),
+    ("011", "Danamon"),
+    ("013", "Permata"),
+    ("200", "BTN"),
+    ("535", "Seabank"),
+    ("542", "Jago"),
+    ("490", "Neo Commerce"),
+    ("10002", "DANA"),
+    ("10001", "OVO"),
+    ("10003", "GoPay"),
+    ("10008", "ShopeePay"),
+    ("10009", "LinkAja"),
+]
+
+
 def ffpay_payout_bank_code(app_code: str, wallet: str) -> str:
     """Konversi Bank.code aplikasi ke kode payout wallet. Return '' jika tidak didukung."""
     code = (app_code or "").strip()
