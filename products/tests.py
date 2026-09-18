@@ -1,15 +1,17 @@
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import Investment, Product, Transaction
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class InvestmentPrincipalReturnTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -219,6 +221,7 @@ class InvestmentPrincipalReturnTest(TestCase):
         )
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class HoldInvestmentMaturityProcessingTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -293,6 +296,7 @@ class HoldInvestmentMaturityProcessingTest(TestCase):
         self.assertFalse(Transaction.objects.filter(user=self.user, type="RETURN").exists())
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class ProductPurchaseWithdrawPinTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -349,3 +353,126 @@ class ProductPurchaseWithdrawPinTest(TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(Investment.objects.filter(user=self.user, product=self.product).count(), 1)
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class ProductListCacheTest(TestCase):
+    """List produk di-cache; cache rilis otomatis begitu data produk berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="list-cache-user",
+            phone="8111888666",
+            email="listcache@example.com",
+            password="pass123",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.product = Product.objects.create(
+            name="Produk Cache",
+            description="Test product list cache",
+            price=Decimal("100.00"),
+            status=1,
+            purchase_limit=5,
+            stock=50,
+            stock_enabled=False,
+            max_purchase_count=5,
+            profit_type="fixed",
+            profit_rate=Decimal("10.00"),
+            profit_method="manual",
+            duration=3,
+            balance_source="balance",
+            claim_reset_mode="after_purchase",
+        )
+
+    def test_list_cache_hit_dan_rilis_saat_produk_berubah(self):
+        with patch("products.views.ProductListSerializer.get_image", return_value="img.png") as mocked_img:
+            first = self.client.get("/api/products/")
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.data["count"], 1)
+            calls_after_first = mocked_img.call_count
+            self.assertGreater(calls_after_first, 0)
+
+            # Request kedua tanpa perubahan data: disajikan dari cache (tidak serialize ulang)
+            second = self.client.get("/api/products/")
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_img.call_count, calls_after_first)
+
+            # Data produk berubah -> cache rilis, respons baru
+            self.product.price = Decimal("250.00")
+            self.product.save(update_fields=["price"])
+            third = self.client.get("/api/products/")
+            self.assertEqual(third.data["results"][0]["price"], "250.00")
+            self.assertGreater(mocked_img.call_count, calls_after_first)
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class TransactionsListCacheTest(TestCase):
+    """List transaksi di-cache per user; cache rilis otomatis begitu data berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="trx-cache-user",
+            phone="8111888555",
+            email="trxcache@example.com",
+            password="pass123",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.product = Product.objects.create(
+            name="Produk Trx Cache",
+            description="Test transactions list cache",
+            price=Decimal("100.00"),
+            status=1,
+            purchase_limit=5,
+            stock=50,
+            stock_enabled=False,
+            max_purchase_count=5,
+            profit_type="fixed",
+            profit_rate=Decimal("10.00"),
+            profit_method="manual",
+            duration=3,
+            balance_source="balance",
+            claim_reset_mode="after_purchase",
+        )
+        self.trx = self._create_trx("TRX-CACHE-001", status="PENDING")
+
+    def _create_trx(self, trx_id, status="COMPLETED", trx_type="BONUS"):
+        return Transaction.objects.create(
+            user=self.user,
+            product=self.product,
+            trx_id=trx_id,
+            type=trx_type,
+            amount=Decimal("10.00"),
+            description="Test transaction",
+            status=status,
+            wallet_type="BALANCE",
+        )
+
+    def test_list_cache_hit_dan_rilis_saat_data_berubah(self):
+        with patch("products.views.TransactionSerializer.get_transaction_id", return_value=None) as mocked_tid:
+            first = self.client.get("/api/transactions/")
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.data["count"], 1)
+            calls_after_first = mocked_tid.call_count
+            self.assertGreater(calls_after_first, 0)
+
+            # Request kedua tanpa perubahan data: disajikan dari cache (tidak serialize ulang)
+            second = self.client.get("/api/transactions/")
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_tid.call_count, calls_after_first)
+
+            # Transaksi baru -> cache rilis
+            self._create_trx("TRX-CACHE-002")
+            third = self.client.get("/api/transactions/")
+            self.assertEqual(third.data["count"], 2)
+            self.assertGreater(mocked_tid.call_count, calls_after_first)
+
+            # Transisi status via save(update_fields) -> cache rilis juga
+            self.trx.status = "COMPLETED"
+            self.trx.save(update_fields=["status"])
+            fourth = self.client.get("/api/transactions/")
+            statuses = {row["trx_id"]: row["status"] for row in fourth.data["results"]}
+            self.assertEqual(statuses["TRX-CACHE-001"], "COMPLETED")

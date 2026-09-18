@@ -1,17 +1,24 @@
+from datetime import timedelta
+from decimal import Decimal
 from io import BytesIO
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.utils import timezone
 from PIL import Image
 from rest_framework import serializers
 from rest_framework.test import APIClient
 
+from accounts.balance_serializers import BalanceStatisticsSerializer
 from accounts.models import GeneralSetting, RankLevel
-from accounts.serializers import ProfilePhotoSerializer
+from accounts.serializers import DownlineListSerializer, DownlineStatsResponseSerializer, ProfilePhotoSerializer
 from deposits.models import Deposit
+from products.models import Transaction
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class AccountInfoRankSyncTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -59,6 +66,7 @@ class AccountInfoRankSyncTest(TestCase):
         self.assertEqual(response.data["rank"], 1)
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class RankOrLogicTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -130,6 +138,7 @@ class RankOrLogicTest(TestCase):
         self.assertEqual(response.data["current_title"], "EV1")
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class RankAndLogicTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -194,6 +203,7 @@ class RankAndLogicTest(TestCase):
         self.assertEqual(response.data["current_title"], "intern")
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class ActiveMemberDefinitionTest(TestCase):
     def setUp(self):
         User = get_user_model()
@@ -258,6 +268,7 @@ class ActiveMemberDefinitionTest(TestCase):
         self.assertEqual(self.user.rank, 2)
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class PublicSettingsOtpFlagTest(TestCase):
     def setUp(self):
         GeneralSetting.objects.create(
@@ -289,3 +300,257 @@ class ProfilePhotoValidationTest(TestCase):
 
     def test_accepts_normal_png(self):
         ProfilePhotoSerializer().validate_avatar(self._png((64, 64)))
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class AccountInfoCacheTest(TestCase):
+    """account-info di-cache per user; cache rilis otomatis begitu data berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="cache-info-user",
+            phone="8111888777",
+            email="cacheinfo@example.com",
+            password="pass123",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_cache_hit_dan_rilis_saat_data_berubah(self):
+        with patch("accounts.views.update_user_rank") as mocked_rank:
+            first = self.client.get("/api/auth/account-info/")
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(mocked_rank.call_count, 1)
+
+            # Request kedua tanpa perubahan data: disajikan dari cache (rank tidak dihitung lagi)
+            second = self.client.get("/api/auth/account-info/")
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_rank.call_count, 1)
+
+            # Data berubah -> cache rilis, respons baru
+            self.user.balance = Decimal("12345.00")
+            self.user.save(update_fields=["balance"])
+            third = self.client.get("/api/auth/account-info/")
+            self.assertEqual(third.data["balance"], "12345.00")
+            self.assertEqual(mocked_rank.call_count, 2)
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class BalanceStatisticsCacheTest(TestCase):
+    """Statistik balance di-cache per user+period; cache rilis otomatis saat data berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="balstat-user",
+            phone="8111777666",
+            email="balstat@example.com",
+            password="pass123",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_all_time_cache_hit_dan_rilis_saat_data_berubah(self):
+        url = "/api/auth/balance-statistics/all-time/"
+        with patch("accounts.views.BalanceStatisticsSerializer", wraps=BalanceStatisticsSerializer) as mocked_ser:
+            first = self.client.get(url)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Request kedua tanpa perubahan: disajikan dari cache (tidak hitung ulang)
+            second = self.client.get(url)
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Balance berubah -> cache rilis
+            self.user.balance = Decimal("500.00")
+            self.user.save(update_fields=["balance"])
+            third = self.client.get(url)
+            self.assertEqual(third.data["balance"], "500.00")
+            self.assertEqual(mocked_ser.call_count, 2)
+
+            # Deposit COMPLETED baru -> cache rilis juga, total deposit naik
+            Deposit.objects.create(
+                user=self.user,
+                gateway="JAYAPAY",
+                order_num="DEP-BALSTAT-001",
+                amount=Decimal("150.00"),
+                credited_amount=Decimal("150.00"),
+                wallet_type="BALANCE",
+                status="COMPLETED",
+            )
+            fourth = self.client.get(url)
+            self.assertEqual(fourth.data["total_deposit_completed"], "150.00")
+            self.assertEqual(mocked_ser.call_count, 3)
+
+    def test_ganti_hari_otomatis_rilis_cache_period_today(self):
+        url = "/api/auth/balance-statistics/today/"
+        day1 = timezone.now().replace(hour=10, minute=0, second=0, microsecond=0)
+        day2 = day1 + timedelta(days=1)
+        with patch("accounts.views.timezone.now", return_value=day1), \
+                patch("accounts.views.BalanceStatisticsSerializer", wraps=BalanceStatisticsSerializer) as mocked_ser:
+            self.client.get(url)
+            self.client.get(url)
+            self.assertEqual(mocked_ser.call_count, 1)  # request kedua kena cache
+
+            with patch("accounts.views.timezone.now", return_value=day2):
+                self.client.get(url)
+            self.assertEqual(mocked_ser.call_count, 2)  # hari berganti -> hitung ulang
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class DownlineListCacheTest(TestCase):
+    """Daftar downline di-cache per user+filter; cache rilis otomatis saat data berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="dl-user",
+            phone="8111888999",
+            email="dl@example.com",
+            password="pass123",
+        )
+        self.child = User.objects.create_user(
+            username="dl-child",
+            phone="8111889000",
+            email="dlchild@example.com",
+            password="pass123",
+            referral_by=self.user,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_cache_hit_dan_rilis_saat_data_berubah(self):
+        User = get_user_model()
+        url = "/api/auth/downline-list/"
+        with patch("accounts.views.DownlineListSerializer", wraps=DownlineListSerializer) as mocked_ser:
+            first = self.client.get(url)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.data["total_members"], 1)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Request kedua tanpa perubahan: disajikan dari cache
+            second = self.client.get(url)
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Filter lain punya key sendiri; balik ke URL awal tetap kena cache
+            self.client.get(url + "?level=2")
+            self.assertEqual(mocked_ser.call_count, 2)
+            self.client.get(url)
+            self.assertEqual(mocked_ser.call_count, 2)
+
+            # Anggota baru masuk subtree (level 2) -> cache rilis
+            User.objects.create_user(
+                username="dl-child2",
+                phone="8111889001",
+                email="dlchild2@example.com",
+                password="pass123",
+                referral_by=self.child,
+            )
+            third = self.client.get(url)
+            self.assertEqual(third.data["total_members"], 2)
+            self.assertEqual(mocked_ser.call_count, 3)
+
+            # Rank anggota berubah via save(update_fields) (updated_at tidak ikut bump) -> rilis
+            self.child.rank = 1
+            self.child.save(update_fields=["rank"])
+            fourth = self.client.get(url)
+            self.assertEqual(fourth.data["members"][0]["rank"], 1)
+            self.assertEqual(mocked_ser.call_count, 4)
+
+            # Deposit COMPLETED milik anggota -> is_active anggota berubah -> rilis
+            Deposit.objects.create(
+                user=self.child,
+                gateway="JAYAPAY",
+                order_num="DEP-DL-001",
+                amount=Decimal("100.00"),
+                credited_amount=Decimal("100.00"),
+                wallet_type="BALANCE",
+                status="COMPLETED",
+            )
+            fifth = self.client.get(url)
+            self.assertEqual(fifth.data["members"][0]["is_active"], True)
+            self.assertEqual(mocked_ser.call_count, 5)
+
+
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
+class DownlineStatsCacheTest(TestCase):
+    """Statistik downline di-cache per user; cache rilis otomatis saat data berubah."""
+
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="dlstat-user",
+            phone="8111999000",
+            email="dlstat@example.com",
+            password="pass123",
+        )
+        self.child = User.objects.create_user(
+            username="dlstat-child",
+            phone="8111999001",
+            email="dlstatchild@example.com",
+            password="pass123",
+            referral_by=self.user,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_cache_hit_dan_rilis_saat_data_berubah(self):
+        User = get_user_model()
+        url = "/api/auth/downline-stats/"
+        with patch("accounts.views.DownlineStatsResponseSerializer", wraps=DownlineStatsResponseSerializer) as mocked_ser:
+            first = self.client.get(url)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(len(first.data["levels"]), 5)
+            self.assertEqual(first.data["levels"][0]["members_total"], 1)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Request kedua tanpa perubahan: disajikan dari cache
+            second = self.client.get(url)
+            self.assertEqual(second.data, first.data)
+            self.assertEqual(mocked_ser.call_count, 1)
+
+            # Anggota baru di level 1 -> cache rilis
+            User.objects.create_user(
+                username="dlstat-child2",
+                phone="8111999002",
+                email="dlstatchild2@example.com",
+                password="pass123",
+                referral_by=self.user,
+            )
+            third = self.client.get(url)
+            self.assertEqual(third.data["levels"][0]["members_total"], 2)
+            self.assertEqual(mocked_ser.call_count, 2)
+
+            # Deposit COMPLETED milik anggota -> level 1 jadi aktif -> rilis
+            Deposit.objects.create(
+                user=self.child,
+                gateway="JAYAPAY",
+                order_num="DEP-DLS-001",
+                amount=Decimal("100.00"),
+                credited_amount=Decimal("100.00"),
+                wallet_type="BALANCE",
+                status="COMPLETED",
+            )
+            fourth = self.client.get(url)
+            self.assertEqual(fourth.data["levels"][0]["members_active"], 1)
+            self.assertEqual(fourth.data["levels"][0]["deposits_total_count"], 1)
+            self.assertEqual(fourth.data["levels"][0]["deposits_total_amount"], "100.00")
+            self.assertEqual(mocked_ser.call_count, 3)
+
+            # Komisi baru (PROFIT_COMMISSION level 1) -> rilis
+            Transaction.objects.create(
+                user=self.user,
+                trx_id="TRX-DLS-001",
+                type="PROFIT_COMMISSION",
+                commission_level=1,
+                amount=Decimal("10.00"),
+                description="Komisi test",
+                status="COMPLETED",
+                wallet_type="BALANCE",
+            )
+            fifth = self.client.get(url)
+            self.assertEqual(fifth.data["levels"][0]["profit_commission_amount"], "10.00")
+            self.assertEqual(mocked_ser.call_count, 4)

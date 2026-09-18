@@ -2,8 +2,9 @@ from rest_framework import generics, status, serializers
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.parsers import MultiPartParser, FormParser
+from django.core.cache import cache
 from django.db import connection, IntegrityError, transaction
-from django.db.models import Sum, Count, Q, Case, When, IntegerField, Value, DecimalField
+from django.db.models import Sum, Count, Q, Case, When, IntegerField, Value, DecimalField, Max
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from accounts.models import User, GeneralSetting, UserAddress, PhoneOTP
@@ -28,6 +29,7 @@ from .utils import calculate_user_rank_progress, calculate_user_rank_progress_br
 import random
 import base64
 import json
+import hashlib
 from django.conf import settings
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
@@ -1073,6 +1075,33 @@ class ChangeWithdrawPinWithOldPinAndOTPView(APIView):
             return Response({'detail': 'Withdraw PIN berhasil diubah.'}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+ACCOUNT_INFO_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# ponytail: TTL 120s cuma jaring pengaman untuk perubahan yang tidak ikut ter-fingerprint
+# (rank dari aktivitas tim/downline, edit RankLevel admin). Upgrade path: Redis +
+# invalidasi event-driven kalau butuh instan.
+
+
+def _account_info_cache_key(user):
+    """Cache key account-info = fingerprint data yang memengaruhi respons.
+
+    Begitu salah satu nilai berubah, key ikut berubah sehingga entri lama tidak
+    terpakai lagi (cache rilis otomatis & konsisten di semua worker tanpa Redis).
+    """
+    inv = Investment.objects.filter(user=user).aggregate(
+        active=Count('id', filter=Q(status='ACTIVE')),
+        claimed=Sum('total_claimed_profit'),
+        max_updated=Max('updated_at'),
+    )
+    raw = '|'.join(str(v) for v in (
+        user.pk, user.updated_at, user.rank, user.username, user.email, user.full_name,
+        user.phone, user.telegram, user.date_of_birth, user.gender, user.avatar,
+        user.referral_by_id, user.referral_code,
+        user.balance, user.balance_deposit, user.balance_hold, user.balance_cashback,
+        inv['active'], inv['claimed'], inv['max_updated'],
+    ))
+    return f'account_info:{user.pk}:{hashlib.md5(raw.encode()).hexdigest()}'
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class AccountInfoView(APIView):
     """
@@ -1125,14 +1154,23 @@ class AccountInfoView(APIView):
         }
     )
     def get(self, request):
-        """Get current user's account information"""
-        try:
-            update_user_rank(request.user)
-            request.user.refresh_from_db(fields=['rank'])
-        except Exception:
-            pass
-        serializer = self.serializer_class(request.user, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        """Get current user's account information (di-cache per user, rilis saat data berubah)"""
+        user = request.user
+        payload = cache.get(_account_info_cache_key(user))
+        if payload is None:
+            try:
+                update_user_rank(user)
+                user.refresh_from_db(fields=['rank', 'updated_at'])
+            except Exception:
+                pass
+            serializer = self.serializer_class(user, context={'request': request})
+            payload = dict(serializer.data)
+            # Rank bisa berubah di atas; simpan pakai fingerprint terbaru
+            cache.set(_account_info_cache_key(user), payload, ACCOUNT_INFO_CACHE_TTL)
+        else:
+            # ip_address selalu dihitung dari request saat ini, bukan ikut ter-cache
+            payload = {**payload, 'ip_address': self.serializer_class(context={'request': request}).get_ip_address(user)}
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -1661,10 +1699,73 @@ class DownlineOverviewView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+DOWNLINE_LIST_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
+# (flip flag qualify_as_active_investment produk, pindah upline_user_id baris komisi lama).
+# Walk tree 5 level tetap jalan tiap request (dibutuhkan untuk fingerprint);
+# ukuran subtree kecil (<50) jadi masih murah.
+
+
+def _downline_list_cache_key(user, params):
+    """Cache key daftar downline: user + filter + fingerprint subtree.
+
+    Walk tree sekalian ambil field profil anggota termasuk rank — rank bisa
+    berubah lewat save(update_fields=['rank']) tanpa bump updated_at. Deposit,
+    investasi, dan komisi dirangkum per nilai (count + sum) supaya transisi
+    status via update_fields tetap terdeteksi.
+    """
+    level_sig = []
+    ids = []
+    current = [user.pk]
+    for _ in range(5):
+        members = list(
+            User.objects.filter(referral_by_id__in=current).order_by('id')
+            .values_list('id', 'referral_by_id', 'username', 'phone', 'full_name',
+                         'rank', 'referral_code', 'created_at', 'updated_at')
+        )
+        current = [m[0] for m in members]
+        ids.extend(current)
+        level_sig.append(members)
+        if not current:
+            break
+
+    dep = Deposit.objects.filter(user_id__in=ids, status='COMPLETED').aggregate(
+        c=Count('id'), s=Sum('amount'), mi=Max('id'))
+    inv = Investment.objects.filter(user_id__in=ids).aggregate(
+        c=Count('id'), s=Sum('total_amount'), mi=Max('id'), mu=Max('updated_at'),
+        ac=Count('id', filter=Q(status='ACTIVE', product__qualify_as_active_investment=True)),
+        asum=Sum('total_amount', filter=Q(status='ACTIVE', product__qualify_as_active_investment=True)))
+    comm = Transaction.objects.filter(
+        user=user, type__in=['PURCHASE_COMMISSION', 'PROFIT_COMMISSION', 'EARNED']
+    ).aggregate(c=Count('id'), s=Sum('amount'), mi=Max('id'))
+    settings_obj = GeneralSetting.objects.order_by('-updated_at').first()
+    active_def = get_active_member_definition(settings_obj)
+    ranks = list(RankLevel.objects.order_by('rank').values_list('rank', 'title'))
+
+    # Normalisasi filter sama persis dengan view, biar request equivalent berbagi key.
+    try:
+        level = int(params.get('level') or '0')
+        if level not in (1, 2, 3, 4, 5):
+            level = 0
+    except (TypeError, ValueError):
+        level = 0
+    filter_status = (params.get('status') or '').strip().lower()
+    if filter_status not in ('active', 'inactive'):
+        filter_status = ''
+
+    raw = '|'.join((
+        str(user.pk), str(user.username), str(user.phone), str(user.referral_code),
+        str(level), filter_status,
+        str(active_def), str(ranks), str(level_sig), str(dep), str(inv), str(comm),
+    ))
+    return f'downline_list:{user.pk}:{hashlib.md5(raw.encode()).hexdigest()}'
+
+
 class DownlineListView(APIView):
     """
     API ringan untuk daftar anggota downline (tanpa data transaksi).
     Mendukung filter berdasarkan level (1-5) dan status (active/inactive).
+    Di-cache per user+filter; rilis otomatis saat data berubah.
     """
     permission_classes = (IsAuthenticated,)
 
@@ -1679,6 +1780,11 @@ class DownlineListView(APIView):
     )
     def get(self, request):
         user = request.user
+        cache_key = _downline_list_cache_key(user, request.query_params)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         settings_obj = GeneralSetting.objects.order_by('-updated_at').first()
         active_def = get_active_member_definition(settings_obj)
         rank_title_map = dict(RankLevel.objects.all().values_list('rank', 'title'))
@@ -1789,6 +1895,7 @@ class DownlineListView(APIView):
         }
 
         serializer = DownlineListSerializer(response_data)
+        cache.set(cache_key, serializer.data, DOWNLINE_LIST_CACHE_TTL)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -2124,6 +2231,53 @@ def dashboard(request):
     return render(request, 'accounts/dashboard.html', {'user': request.user})
 
 
+BALANCE_STATS_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
+# (rename produk, flag qualify_as_active_investment produk, edit nominal baris lama).
+
+
+def _balance_stats_period_anchor(period):
+    """Tanggal jangkar window period; ganti hari/minggu/bulan -> key cache ikut ganti."""
+    now_dt = timezone.now()
+    today = timezone.localdate(now_dt) if timezone.is_aware(now_dt) else now_dt.date()
+    if period == 'today':
+        return str(today)
+    if period == 'yesterday':
+        return str(today - timedelta(days=1))
+    if period == 'weekly':
+        return str(today - timedelta(days=today.weekday()))
+    if period == 'monthly':
+        return str(today.replace(day=1))
+    return 'all'
+
+
+def _balance_stats_cache_key(user, period):
+    """Cache key statistik balance: user + period + fingerprint data sumbernya.
+
+    Agregat digroup per status supaya transisi status (save update_fields)
+    tetap terdeteksi. Anggota downline aktif level 1-3 dihitung lewat join
+    referral (sekaligus, satu query).
+    """
+    uid = user.pk
+    dep = list(Deposit.objects.filter(user=user).values('status').annotate(c=Count('id'), s=Sum('amount')).order_by('status'))
+    wd = list(Withdrawal.objects.filter(user=user).values('status').annotate(c=Count('id'), s=Sum('amount')).order_by('status'))
+    tx = list(Transaction.objects.filter(user=user).values('status').annotate(c=Count('id'), s=Sum('amount')).order_by('status'))
+    inv = list(Investment.objects.filter(user=user).values('status').annotate(c=Count('id'), q=Sum('quantity'), a=Sum('total_amount')).order_by('status'))
+    downline_active = Investment.objects.filter(
+        Q(user__referral_by_id=uid)
+        | Q(user__referral_by__referral_by_id=uid)
+        | Q(user__referral_by__referral_by__referral_by_id=uid),
+        status='ACTIVE',
+        product__qualify_as_active_investment=True,
+    ).count()
+    raw = '|'.join((
+        str(uid), period, _balance_stats_period_anchor(period),
+        str(user.balance), str(user.balance_deposit), str(getattr(user, 'balance_hold', 0) or 0),
+        str(dep), str(wd), str(tx), str(inv), str(downline_active),
+    ))
+    return f'balance_stats:{hashlib.md5(raw.encode()).hexdigest()}'
+
+
 class BalanceStatisticsView(APIView):
     """
     API untuk mendapatkan statistik balance, deposit, withdraw, dan komisi
@@ -2149,6 +2303,11 @@ class BalanceStatisticsView(APIView):
                 'error': 'Invalid period. Use "today", "yesterday", "weekly", "monthly" or "all-time"'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        cache_key = _balance_stats_cache_key(user, period)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         # Set date filter berdasarkan period
         if period == 'today':
             now_dt = timezone.now()
@@ -2390,7 +2549,9 @@ class BalanceStatisticsView(APIView):
         }
         
         serializer = BalanceStatisticsSerializer(response_data)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        payload = serializer.data
+        cache.set(cache_key, payload, BALANCE_STATS_CACHE_TTL)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class BalanceStatisticsTodayView(BalanceStatisticsView):
@@ -2627,6 +2788,63 @@ def user_logout(request):
 
 
 
+DOWNLINE_STATS_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
+# (flip flag qualify_as_active_investment produk).
+
+
+def _downline_stats_cache_key(user):
+    """Cache key statistik downline: user + fingerprint subtree per level.
+
+    Walk per level lewat referral_by (1 query/level; di view-nya N+1). Deposit,
+    withdraw, dan investasi dirangkum per user dalam satu query group-by
+    (count + sum) — transisi status via update_fields tetap terdeteksi, dan
+    grouping per level direkonstruksi dari daftar id level. Komisi digroup per
+    type + commission_level karena view memisahkan total per level.
+    """
+    levels_ids = []
+    current = [user.pk]
+    for _ in range(5):
+        ids = list(
+            User.objects.filter(referral_by_id__in=current).order_by('id')
+            .values_list('id', flat=True)
+        )
+        levels_ids.append(ids)
+        current = ids
+        if not current:
+            break
+    all_ids = [i for ids in levels_ids for i in ids]
+
+    dep = {
+        r['user_id']: (r['c'], r['s'])
+        for r in Deposit.objects.filter(user_id__in=all_ids, status='COMPLETED')
+        .values('user_id').annotate(c=Count('id'), s=Sum('amount'))
+    }
+    inv = {
+        r['user_id']: (r['c'], r['s'])
+        for r in Investment.objects.filter(
+            user_id__in=all_ids, status='ACTIVE', product__qualify_as_active_investment=True
+        ).values('user_id').annotate(c=Count('id'), s=Sum('total_amount'))
+    }
+    wd = {
+        r['user_id']: (r['c'], r['s'])
+        for r in Withdrawal.objects.filter(user_id__in=all_ids, status='COMPLETED')
+        .values('user_id').annotate(c=Count('id'), s=Sum('amount'))
+    }
+    comm = list(
+        Transaction.objects.filter(user=user, type__in=['PROFIT_COMMISSION', 'PURCHASE_COMMISSION'])
+        .values('type', 'commission_level')
+        .annotate(c=Count('id'), s=Sum('amount'))
+        .order_by('type', 'commission_level')
+    )
+    raw = '|'.join((
+        str(user.pk), str(levels_ids),
+        str(sorted(dep.items())), str(sorted(inv.items())), str(sorted(wd.items())),
+        str(comm),
+    ))
+    return f'downline_stats:{user.pk}:{hashlib.md5(raw.encode()).hexdigest()}'
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class DownlineStatsView(APIView):
     """
@@ -2635,6 +2853,7 @@ class DownlineStatsView(APIView):
     - Total deposit (COMPLETED) per level
     - Total withdraw (COMPLETED) per level
     - Total commission per level (profit & purchase)
+    Di-cache per user; rilis otomatis saat data berubah.
     """
     permission_classes = (IsAuthenticated,)
 
@@ -2680,6 +2899,11 @@ class DownlineStatsView(APIView):
     )
     def get(self, request):
         user = request.user
+        cache_key = _downline_stats_cache_key(user)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         levels = []
         current_level = [user]
 
@@ -2763,6 +2987,7 @@ class DownlineStatsView(APIView):
             current_level = next_level
 
         serializer = DownlineStatsResponseSerializer({'levels': levels})
+        cache.set(cache_key, serializer.data, DOWNLINE_STATS_CACHE_TTL)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 

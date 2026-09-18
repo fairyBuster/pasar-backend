@@ -3,8 +3,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated, IsAdminUser
+from django.core.cache import cache
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Count, Max, Sum
 from django.db import transaction
 from decimal import Decimal
 from decimal import InvalidOperation
@@ -21,6 +22,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.exceptions import ValidationError
 from rest_framework import serializers
 import uuid
+import hashlib
 from zoneinfo import ZoneInfo
 from datetime import datetime, time, timedelta
 
@@ -34,6 +36,32 @@ def _now_in_zone(tz):
     if timezone.is_aware(now):
         return timezone.localtime(now, tz)
     return now
+
+PRODUCTS_LIST_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data produk berubah
+# ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
+# (file gambar produk ditambah/dihapus tanpa simpan row Product). Upgrade path: Redis +
+# invalidasi event-driven kalau butuh instan.
+
+
+def _products_list_cache_key(user, params):
+    """Cache key list produk: flag staff + filter + fingerprint tabel products.
+
+    Respons list produk identik untuk semua user (murni data produk), jadi cache
+    dipakai lintas user. Setiap perubahan row Product (harga, stok, status, dll)
+    mengubah fingerprint -> key baru, entri lama tidak terpakai lagi.
+    """
+    prod = Product.objects.aggregate(
+        count=Count('id'), max_id=Max('id'), stock_sum=Sum('stock'), price_sum=Sum('price'), max_updated=Max('updated_at'),
+    )
+    raw = '|'.join((
+        str(int(bool(user.is_staff))),
+        (params.get('min_price') or '').strip(),
+        (params.get('max_price') or '').strip(),
+        (params.get('min_duration') or '').strip(),
+        (params.get('max_duration') or '').strip(),
+        str(prod['count']), str(prod['max_id']), str(prod['stock_sum']), str(prod['price_sum']), str(prod['max_updated']),
+    ))
+    return f'products_list:{hashlib.md5(raw.encode()).hexdigest()}'
 
 @extend_schema_view(
     list=extend_schema(tags=[USER_TAG]),
@@ -171,12 +199,17 @@ class ProductViewSet(viewsets.ModelViewSet):
         """
     )
     def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        serializer = self.get_serializer(queryset, many=True)
-        return Response({
-            'count': queryset.count(),
-            'results': serializer.data
-        })
+        """List produk (di-cache; rilis otomatis saat data produk berubah)"""
+        payload = cache.get(_products_list_cache_key(request.user, request.query_params))
+        if payload is None:
+            queryset = self.get_queryset()
+            serializer = self.get_serializer(queryset, many=True)
+            payload = {
+                'count': queryset.count(),
+                'results': serializer.data
+            }
+            cache.set(_products_list_cache_key(request.user, request.query_params), payload, PRODUCTS_LIST_CACHE_TTL)
+        return Response(payload)
     
     @extend_schema(
         tags=[USER_TAG],
@@ -532,6 +565,42 @@ class ProductViewSet(viewsets.ModelViewSet):
             trx_id=f'CBK-{now_wib.strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:6].upper()}'
         )
 
+TRANSACTIONS_LIST_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# Staff bypass cache (scope-nya semua user, fingerprint per user tidak representatif).
+# ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
+# (edit nominal/deskripsi transaksi di baris lama, data bank/service withdrawal).
+# Transaction tidak punya kolom updated_at, jadi fingerprint pakai jumlah + max id per status.
+
+
+def _transactions_list_cache_key(user, params):
+    """Cache key list transaksi: user + filter + fingerprint transaksi & investasi.
+
+    Digroup per status supaya transisi status tetap terdeteksi walau row di-save
+    pakai update_fields (auto_now updated_at tidak ikut ter-update).
+    """
+    tx = list(
+        Transaction.objects.filter(user=user)
+        .values('status').annotate(c=Count('id'), mi=Max('id'))
+        .order_by('status')
+    )
+    inv = list(
+        Investment.objects.filter(user=user)
+        .values('status').annotate(c=Count('id'), mu=Max('updated_at'))
+        .order_by('status')
+    )
+    raw = '|'.join((
+        str(user.pk),
+        (params.get('type') or '').strip(),
+        (params.get('status') or '').strip(),
+        (params.get('wallet_type') or '').strip(),
+        (params.get('start_date') or '').strip(),
+        (params.get('end_date') or '').strip(),
+        str(params.get('page') or ''),
+        str(tx),
+        str(inv),
+    ))
+    return f'transactions_list:{hashlib.md5(raw.encode()).hexdigest()}'
+
 @extend_schema_view(
     list=extend_schema(tags=[USER_TAG]),
     retrieve=extend_schema(tags=[USER_TAG]),
@@ -630,6 +699,14 @@ class TransactionViewSet(viewsets.ModelViewSet):
         description='Get list of transactions. Regular users can only see their own transactions. Admin can see all transactions.'
     )
     def list(self, request, *args, **kwargs):
+        """List transaksi (di-cache per user; rilis otomatis saat data berubah)"""
+        cache_key = None
+        if not request.user.is_staff:
+            cache_key = _transactions_list_cache_key(request.user, request.query_params)
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return Response(cached)
+
         queryset = self.get_queryset()
         
         # Apply filters
@@ -665,10 +742,14 @@ class TransactionViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
+            response = self.get_paginated_response(serializer.data)
+        else:
+            serializer = self.get_serializer(queryset, many=True)
+            response = Response(serializer.data)
 
-        serializer = self.get_serializer(queryset, many=True)
-        return Response(serializer.data)
+        if cache_key is not None:
+            cache.set(cache_key, response.data, TRANSACTIONS_LIST_CACHE_TTL)
+        return response
 
 
 @extend_schema_view(

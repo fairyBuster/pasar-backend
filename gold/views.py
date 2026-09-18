@@ -1,8 +1,10 @@
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 import uuid
+import hashlib
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
 from django.utils.decorators import method_decorator
@@ -234,9 +236,46 @@ class GoldSwapView(APIView):
         return Response(GoldSwapResponseSerializer(response_data).data, status=status.HTTP_201_CREATED)
 
 
+GOLD_INFO_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data berubah
+# ponytail: TTL cuma jaring pengaman. Bucket fresh/expired harga ikut masuk key, jadi saat
+# window price_cache_minutes habis cache otomatis rilis dan view ambil harga baru. Saat API
+# harga sedang mati, respons "stale" ikut ter-cache — sekaligus menahan timeout request keluar.
+
+
+def _gold_info_cache_key(user):
+    """Cache key info emas: saldo user + fingerprint GoldSettings + status kesegaran harga.
+
+    price_source bergantung waktu (cache -> live/stale setelah price_cache_minutes),
+    jadi status fresh/expired ikut dihitung di key.
+    """
+    parts = [str(user.pk), str(user.balance_hold or 0), str(user.balance_deposit or 0)]
+    settings_obj = GoldSettings.load()
+    if settings_obj is None:
+        parts.append('no-settings')
+    else:
+        now = timezone.now()
+        cache_minutes = int(settings_obj.price_cache_minutes or 5)
+        is_fresh = (
+            settings_obj.last_price_per_gram is not None
+            and settings_obj.last_price_updated_at is not None
+            and (now - settings_obj.last_price_updated_at) < timezone.timedelta(minutes=cache_minutes)
+        )
+        parts.extend((
+            str(settings_obj.is_active), str(settings_obj.printing_fee_per_gram),
+            str(settings_obj.shipping_cost), str(settings_obj.price_cache_minutes),
+            str(settings_obj.last_price_per_gram), str(settings_obj.last_price_usd_per_oz),
+            str(settings_obj.last_usd_idr_rate), str(settings_obj.last_price_updated_at),
+            'fresh' if is_fresh else 'expired',
+        ))
+    return f'gold_info:{user.pk}:{hashlib.md5("|".join(parts).encode()).hexdigest()}'
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class GoldInfoView(APIView):
-    """Info harga emas real-time + tarif biaya cetak & ongkir (untuk halaman tukar emas)."""
+    """Info harga emas real-time + tarif biaya cetak & ongkir (untuk halaman tukar emas).
+
+    Di-cache per user; rilis otomatis saat data berubah.
+    """
 
     permission_classes = (permissions.IsAuthenticated,)
 
@@ -274,9 +313,14 @@ class GoldInfoView(APIView):
         ),
     )
     def get(self, request):
+        cache_key = _gold_info_cache_key(request.user)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached, status=status.HTTP_200_OK)
+
         settings_obj = GoldSettings.load()
         if settings_obj is None:
-            return Response({
+            payload = {
                 'is_active': False,
                 'price_available': False,
                 'price_per_gram': None,
@@ -288,7 +332,9 @@ class GoldInfoView(APIView):
                 'shipping_cost': '0.00',
                 'balance_hold': request.user.balance_hold or Decimal('0.00'),
                 'balance_deposit': request.user.balance_deposit or Decimal('0.00'),
-            }, status=status.HTTP_200_OK)
+            }
+            cache.set(cache_key, payload, GOLD_INFO_CACHE_TTL)
+            return Response(payload, status=status.HTTP_200_OK)
 
         data = {
             'is_active': bool(settings_obj.is_active),
@@ -315,7 +361,9 @@ class GoldInfoView(APIView):
         except Exception:
             pass
 
-        return Response(GoldInfoResponseSerializer(data).data, status=status.HTTP_200_OK)
+        payload = GoldInfoResponseSerializer(data).data
+        cache.set(cache_key, payload, GOLD_INFO_CACHE_TTL)
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 @method_decorator(csrf_exempt, name='dispatch')
