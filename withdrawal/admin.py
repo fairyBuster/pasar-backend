@@ -12,7 +12,7 @@ from .integrations.usd_payout import build_payload as usd_build_payload, sign_hm
 from .integrations.ppaypros import build_payout_payload as ppaypros_build_payout_payload, map_payout_state as ppaypros_map_payout_state
 from deposits.integrations.ppaypros import amount_to_points as ppaypros_amount_to_points, generate_sign as ppaypros_generate_sign, parse_data_field as ppaypros_parse_data_field, post_json as ppaypros_post_json, verify_sign as ppaypros_verify_sign
 from deposits.integrations.atpay import build_bank_code_payload as atpay_build_bank_code_payload, build_payout_payload as atpay_build_payout_payload, build_payout_query_payload as atpay_build_payout_query_payload, map_payout_trade_status as atpay_map_payout_trade_status, normalize_amount as atpay_normalize_amount, normalize_sign_type as atpay_normalize_sign_type, post_json as atpay_post_json, sign_payload as atpay_sign_payload, verify_payload as atpay_verify_payload
-from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign, post_form as bankpay_post_form, build_payout_payload as bankpay_build_payout_payload, fetch_bank_list as bankpay_fetch_bank_list
+from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign, post_form as bankpay_post_form, build_payout_payload as bankpay_build_payout_payload, build_payout_order_id as bankpay_build_payout_order_id, fetch_bank_list as bankpay_fetch_bank_list, resolve_bankpay_bank as bankpay_resolve_bank, BANKPAY_BANK_LIST
 from deposits.integrations.reepay import post_json as reepay_post_json
 from .integrations.ffpay import FFPAY_POPULAR_BANKS, ffpay_payout_bank_code
 from .views import FFPAY_PAYOUT_WALLETS
@@ -829,12 +829,12 @@ class WithdrawalAdmin(admin.ModelAdmin):
         api_url = (gs.bankpay_payout_api_url or "https://pay.bankpay.cfd").strip() if gs else ""
         member_id = (gs.bankpay_payout_member_id or "").strip() if gs else ""
         key = (gs.bankpay_payout_key or "").strip() if gs else ""
-        app_domain = getattr(gs, "app_domain", "").strip() if gs else ""
+        app_domain = (getattr(gs, "app_domain", "") or "").strip().strip("/") if gs else ""
         if not app_domain:
             try:
                 from deposits.models import GatewaySettings
                 ggs = GatewaySettings.objects.order_by("-updated_at").first()
-                app_domain = (getattr(ggs, "app_domain", "") or "").strip() if ggs else ""
+                app_domain = (getattr(ggs, "app_domain", "") or "").strip().strip("/") if ggs else ""
             except Exception:
                 app_domain = ""
 
@@ -848,6 +848,8 @@ class WithdrawalAdmin(admin.ModelAdmin):
         if request.method == "POST":
             bankno = (request.POST.get("bankno") or (getattr(wd.bank_account.bank, "code", "") if wd.bank_account else "")).strip()
             bankname = (request.POST.get("bankname") or (getattr(wd.bank_account.bank, "name", "") if wd.bank_account else "")).strip()
+            # Konversi kode bank aplikasi (mis. "014"/"10002") ke kode resmi BankPay.
+            bankno, bankname = bankpay_resolve_bank(bankno, bankname)
             cardnumber = (request.POST.get("cardnumber") or (wd.bank_account.account_number if wd.bank_account else "")).strip()
             accountname = (request.POST.get("accountname") or (wd.bank_account.account_name if wd.bank_account else "")).strip()
             mobile = (request.POST.get("mobile") or getattr(wd.user, "phone", "") or "").strip()
@@ -867,6 +869,11 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
             order_id = wd.transaction.trx_id if wd.transaction else f"WBP{wd.id}{int(time.time())}"
+            # BankPay menyimpan orderid percobaan yang gagal ("Order id already exists"),
+            # jadi percobaan ulang memakai orderid baru.
+            order_id = bankpay_build_payout_order_id(
+                order_id, is_retry=BankPayWithdrawal.objects.filter(withdrawal=wd).exists()
+            )
             notify_url = f"https://{app_domain}/api/withdrawals/bankpay/callback/"
             pay_amount = f"{amount:.2f}"
 
@@ -898,9 +905,17 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 trace.save(update_fields=["response_payload"])
 
             if isinstance(response_payload, dict) and response_payload.get("status") == 1:
+                msg = response_payload.get("msg") if isinstance(response_payload.get("msg"), dict) else {}
+                trade_state = str(msg.get("trade_state") or "").strip().upper()
+                # trade_state initiate tidak final (bisa SUCCESS lalu REFUSE) — status akhir via callback/dfquery.
+                if trade_state == "REFUSE":
+                    wd.status = 'REJECTED'
+                    wd.save(update_fields=['status'])
+                    self.message_user(request, f"BankPay menolak (REFUSE): {msg.get('trade_msg') or ''}".strip(), level=messages.ERROR)
+                    return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
                 wd.status = 'PROCESSING'
                 wd.save(update_fields=['status'])
-                self.message_user(request, f"Withdrawal #{wd.id} dikirim ke BankPay", level=messages.SUCCESS)
+                self.message_user(request, f"Withdrawal #{wd.id} dikirim ke BankPay ({trade_state or 'tanpa trade_state'})", level=messages.SUCCESS)
                 return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
             wd.status = 'REJECTED'
@@ -1109,6 +1124,9 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     )
                 except Exception as e:
                     bankpay_bank_codes_error = str(e)
+            if not bankpay_bank_codes:
+                # Fallback daftar bank resmi BankPay bila API getBankList tidak bisa diakses.
+                bankpay_bank_codes = [{"bankCode": c, "bankName": n} for c, n in BANKPAY_BANK_LIST]
             # Daftar bank Reepay pakai daftar statis (tanpa fetch API)
             reepay_bank_codes = [
                 {"bank_code": c, "bank_name": n}
@@ -1116,6 +1134,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
             ]
             wd_bank_code = getattr(getattr(obj.bank_account, 'bank', None), 'code', '') or ''
             wd_bank_name = getattr(getattr(obj.bank_account, 'bank', None), 'name', '') or ''
+            bankpay_bank_no, bankpay_bank_name = bankpay_resolve_bank(wd_bank_code, wd_bank_name)
             if wd_bank_code and not any(b["bank_code"] == wd_bank_code for b in reepay_bank_codes):
                 reepay_bank_codes.insert(0, {"bank_code": wd_bank_code, "bank_name": wd_bank_name})
             reepay_bank_codes_error = ""
@@ -1205,8 +1224,8 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     'bankcode': getattr(getattr(obj.bank_account, 'bank', None), 'code', '') or '',
                     'cardnumber': obj.bank_account.account_number if obj.bank_account else '',
                     'accountname': obj.bank_account.account_name if obj.bank_account else '',
-                    'bankname': getattr(getattr(obj.bank_account, 'bank', None), 'name', '') or '',
-                    'bankno': getattr(getattr(obj.bank_account, 'bank', None), 'code', '') or '',
+                    'bankname': bankpay_bank_name,
+                    'bankno': bankpay_bank_no,
                     'mobile': (getattr(obj.bank_account, 'phone', '') or getattr(obj.user, 'phone', '') or '').strip(),
                     'email': getattr(obj.user, 'email', '') or f"user{obj.user_id}@example.com",
                     'amount': str(obj.net_amount or obj.amount),
@@ -1307,7 +1326,14 @@ class WithdrawalAdmin(admin.ModelAdmin):
         api_url = (gs.bankpay_payout_api_url or "https://pay.bankpay.cfd").strip() if gs else ""
         member_id = (gs.bankpay_payout_member_id or "").strip() if gs else ""
         key = (gs.bankpay_payout_key or "").strip() if gs else ""
-        app_domain = getattr(gs, "app_domain", "").strip() if gs else ""
+        app_domain = (getattr(gs, "app_domain", "") or "").strip().strip("/") if gs else ""
+        if not app_domain:
+            try:
+                from deposits.models import GatewaySettings
+                ggs = GatewaySettings.objects.order_by("-updated_at").first()
+                app_domain = (getattr(ggs, "app_domain", "") or "").strip().strip("/") if ggs else ""
+            except Exception:
+                app_domain = ""
 
         if not enabled:
             self.message_user(request, 'BankPay payout tidak aktif', level=messages.ERROR)
@@ -1330,9 +1356,16 @@ class WithdrawalAdmin(admin.ModelAdmin):
             account_name = wd.bank_account.account_name or ""
             bank_name_str = getattr(bank, "name", "") or ""
             bank_code = getattr(bank, "code", "") or ""
+            # Konversi kode bank aplikasi (mis. "014"/"10002") ke kode resmi BankPay.
+            bank_no, bank_name_str = bankpay_resolve_bank(bank_code, bank_name_str)
 
             try:
                 order_id = getattr(getattr(wd, "transaction", None), "trx_id", None) or f"WBP{wd.pk}{int(time.time())}"
+                # BankPay menyimpan orderid percobaan yang gagal ("Order id already exists"),
+                # jadi percobaan ulang memakai orderid baru.
+                order_id = bankpay_build_payout_order_id(
+                    order_id, is_retry=BankPayWithdrawal.objects.filter(withdrawal=wd).exists()
+                )
                 notify_url = f"https://{app_domain}/api/withdrawals/bankpay/callback/"
                 # Use withdrawal net amount
                 net = wd.net_amount if wd.net_amount and wd.net_amount > 0 else (wd.amount - wd.fee if wd.fee else wd.amount)
@@ -1349,7 +1382,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     bank_name=bank_name_str,
                     card_number=account_no,
                     account_name=account_name,
-                    bank_no=bank_code,
+                    bank_no=bank_no,
                 )
                 payload["sign"] = bankpay_generate_sign(payload, key)
 
@@ -1364,10 +1397,23 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     trace.response_payload = stored
                     trace.save(update_fields=["request_params", "response_payload"])
 
-                wd.status = 'PROCESSING'
-                wd.save()
-                processed += 1
-                self.message_user(request, f"Withdrawal #{wd.id} dikirim ke BankPay", level=messages.SUCCESS)
+                if isinstance(resp, dict) and resp.get("status") == 1:
+                    msg = resp.get("msg") if isinstance(resp.get("msg"), dict) else {}
+                    trade_state = str(msg.get("trade_state") or "").strip().upper()
+                    # trade_state initiate tidak final (bisa SUCCESS lalu REFUSE) — status akhir via callback/dfquery.
+                    if trade_state == "REFUSE":
+                        wd.status = 'REJECTED'
+                        wd.save()
+                        self.message_user(request, f"Withdrawal #{wd.id} ditolak BankPay: {msg.get('trade_msg') or 'REFUSE'}", level=messages.ERROR)
+                        continue
+                    wd.status = 'PROCESSING'
+                    wd.save()
+                    processed += 1
+                    self.message_user(request, f"Withdrawal #{wd.id} dikirim ke BankPay", level=messages.SUCCESS)
+                else:
+                    wd.status = 'REJECTED'
+                    wd.save()
+                    self.message_user(request, f"Withdrawal #{wd.id} gagal BankPay: {resp.get('msg') if isinstance(resp, dict) else resp}", level=messages.ERROR)
             except Exception as e:
                 self.message_user(request, f"Withdrawal #{wd.id} gagal dikirim: {e}", level=messages.ERROR)
 

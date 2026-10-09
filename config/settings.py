@@ -258,6 +258,7 @@ REST_FRAMEWORK = {
         'transactions': '20/min',
         'banks_user': '20/min',
         'banks_list': '20/min',
+        'deposit_methods': '30/min',
         'reviews_create': '10/min',
         'reviews_like': '60/min',
         'admin_analytics': '60/min',

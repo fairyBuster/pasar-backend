@@ -42,7 +42,9 @@ from deposits.integrations.bankpay import (
     verify_sign as bankpay_verify_sign,
     post_form as bankpay_post_form,
     build_payout_payload as bankpay_build_payout_payload,
+    build_payout_order_id as bankpay_build_payout_order_id,
     map_payout_returncode as bankpay_map_payout_returncode,
+    resolve_bankpay_bank as bankpay_resolve_bank,
 )
 from deposits.integrations.reepay import (
     post_json as reepay_post_json,
@@ -1303,7 +1305,7 @@ class BankPayPayoutInitiateView(APIView):
         api_url = (gs.bankpay_payout_api_url or "https://pay.bankpay.cfd").strip() if gs else ""
         member_id = (gs.bankpay_payout_member_id or "").strip() if gs else ""
         key = (gs.bankpay_payout_key or "").strip() if gs else ""
-        app_domain = _resolve_app_domain(gs)
+        app_domain = _resolve_app_domain(gs).strip("/")
 
         if not enabled:
             return Response({"detail": "BankPay payout tidak aktif"}, status=status.HTTP_400_BAD_REQUEST)
@@ -1325,6 +1327,8 @@ class BankPayPayoutInitiateView(APIView):
         bank_name = getattr(getattr(wd, "bank_account", None), "bank", None)
         bank_name_str = getattr(bank_name, "name", "") or ""
         bank_code = getattr(bank_name, "code", "") or ""
+        # Konversi kode bank aplikasi (mis. "014"/"10002") ke kode resmi BankPay.
+        bank_no, bank_name_str = bankpay_resolve_bank(bank_code, bank_name_str)
 
         amount_raw = request.data.get("amount")
         try:
@@ -1335,6 +1339,11 @@ class BankPayPayoutInitiateView(APIView):
             return Response({"detail": "amount tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
 
         order_id = getattr(getattr(wd, "transaction", None), "trx_id", None) or f"WBP{wd.pk}{int(pytime.time())}"
+        # BankPay menyimpan orderid percobaan yang gagal ("Order id already exists"),
+        # jadi percobaan ulang memakai orderid baru.
+        order_id = bankpay_build_payout_order_id(
+            order_id, is_retry=BankPayWithdrawal.objects.filter(withdrawal=wd).exists()
+        )
         notify_url = f"https://{app_domain}/api/withdrawals/bankpay/callback/"
         pay_amount = f"{amount:.2f}"
 
@@ -1349,7 +1358,7 @@ class BankPayPayoutInitiateView(APIView):
             bank_name=bank_name_str,
             card_number=account_no,
             account_name=account_name,
-            bank_no=bank_code,
+            bank_no=bank_no,
         )
         payload["sign"] = bankpay_generate_sign(payload, key)
 
@@ -1368,15 +1377,13 @@ class BankPayPayoutInitiateView(APIView):
         if isinstance(response_payload, dict) and response_payload.get("status") == 1:
             msg = response_payload.get("msg") if isinstance(response_payload.get("msg"), dict) else {}
             trade_state = str(msg.get("trade_state") or "").strip().upper()
-            if trade_state == "SUCCESS":
-                wd.status = "COMPLETED"
-                wd.save(update_fields=["status"])
-            elif trade_state in ("REFUSE",):
+            # trade_state initiate tidak final (bisa SUCCESS lalu berubah REFUSE) —
+            # status akhir ditentukan callback / dfquery.
+            if trade_state == "REFUSE":
                 wd.status = "REJECTED"
-                wd.save(update_fields=["status"])
             else:
                 wd.status = "PROCESSING"
-                wd.save(update_fields=["status"])
+            wd.save(update_fields=["status"])
             return Response({"gateway": response_payload}, status=status.HTTP_200_OK)
 
         wd.status = "REJECTED"
@@ -1399,6 +1406,9 @@ class BankPayPayoutCallbackView(APIView):
             return HttpResponse("OK", content_type="text/plain")
 
         trx = Transaction.objects.filter(trx_id=order_id).first()
+        if not trx:
+            # Orderid percobaan ulang = trx_id + "-<millis>"; cocokkan tanpa suffix.
+            trx = Transaction.objects.filter(trx_id=order_id.rsplit("-", 1)[0]).first()
         withdrawal = Withdrawal.objects.filter(transaction=trx).first() if trx else None
         if not withdrawal:
             return HttpResponse("OK", content_type="text/plain")

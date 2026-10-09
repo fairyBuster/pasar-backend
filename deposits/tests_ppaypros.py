@@ -4,7 +4,7 @@ import hmac
 import json
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from deposits.integrations.atpay import sign_payload as atpay_sign_payload
@@ -13,6 +13,7 @@ from deposits.models import Deposit, GatewaySettings
 from products.models import Transaction
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class PPayProsDepositCallbackTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -80,6 +81,7 @@ class PPayProsDepositCallbackTest(TestCase):
         self.assertEqual(deposit.credited_amount, Decimal("100.00"))
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class ClientHubDepositCallbackTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -251,6 +253,7 @@ class ClientHubDepositCallbackTest(TestCase):
         self.assertEqual(deposit.status, "PENDING")
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class SiTransferHubDepositCallbackTest(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -386,6 +389,7 @@ class SiTransferHubDepositCallbackTest(TestCase):
         self.assertEqual(deposit.status, "PENDING")
 
 
+@override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
 class AtpayDepositCallbackTest(TestCase):
     def setUp(self):
         self.client = APIClient()

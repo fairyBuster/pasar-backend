@@ -9,7 +9,7 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiTypes, OpenApiExample, OpenApiResponse
 from decimal import Decimal, InvalidOperation
 import random
 import uuid
@@ -5629,4 +5629,56 @@ class QuenPayDepositCallbackView(APIView):
         payload = _quenpay_callback_payload(request)
         _quenpay_handle_callback(request, payload)
         return HttpResponse("OK", content_type="text/plain")
+
+
+class DepositMethodsView(APIView):
+    """Status aktif tiap metode deposit — dipakai frontend sebelum menampilkan opsi."""
+
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = 'deposit_methods'
+
+    @extend_schema(
+        tags=["User API"],
+        description=(
+            "List metode deposit beserta status aktif/nonaktif dan path initiate-nya. "
+            "Tambahkan ?enabled=true untuk hanya menerima metode yang aktif."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="enabled",
+                type=str,
+                required=False,
+                description="Jika diisi true/1/yes, hanya kembalikan metode yang aktif saja",
+            )
+        ],
+        responses={200: OpenApiResponse(description="List metode deposit")},
+    )
+    def get(self, request):
+        gs = GatewaySettings.objects.order_by('-updated_at').first()
+
+        def is_on(flag):
+            return bool(gs and getattr(gs, flag, False))
+
+        methods = [
+            {"code": "jayapay", "name": "Jayapay", "enabled": is_on("jayapay_enabled"), "initiate_path": "/api/deposits/jayapay/initiate/"},
+            {"code": "jayapay-ph", "name": "Jayapay PH", "enabled": is_on("jayapay_ph_enabled"), "initiate_path": "/api/deposits/jayapay-ph/initiate/"},
+            {"code": "klikpay", "name": "Klikpay", "enabled": is_on("klikpay_enabled"), "initiate_path": "/api/deposits/klikpay/initiate/"},
+            {"code": "nova", "name": "ATPAY", "enabled": is_on("atpay_enabled"), "initiate_path": "/api/deposits/nova/initiate/"},
+            {"code": "orion", "name": "BankPay", "enabled": is_on("bankpay_enabled"), "initiate_path": "/api/deposits/orion/initiate/"},
+            {"code": "qris", "name": "QRIS", "enabled": is_on("qris_enabled"), "initiate_path": "/api/deposits/qris/initiate/"},
+            {"code": "reepay", "name": "Reepay", "enabled": is_on("reepay_enabled"), "initiate_path": "/api/deposits/reepay/initiate/"},
+            {"code": "vega", "name": "FF Pay", "enabled": is_on("ffpay_enabled"), "initiate_path": "/api/deposits/vega/initiate/"},
+            {"code": "lpay", "name": "LPAY", "enabled": is_on("lpay_enabled"), "initiate_path": "/api/deposits/lpay/initiate/"},
+            {"code": "lyra", "name": "MGM", "enabled": is_on("mgm_enabled"), "initiate_path": "/api/deposits/lyra/initiate/"},
+            {"code": "quenpay", "name": "QuenPay", "enabled": is_on("quenpay_enabled"), "initiate_path": "/api/deposits/quenpay/initiate/"},
+            {"code": "ppaypros", "name": "PPayPros", "enabled": is_on("ppaypros_enabled"), "initiate_path": "/api/deposits/ppaypros/initiate/"},
+            {"code": "clienthub", "name": "ClientHub", "enabled": is_on("clienthub_enabled"), "initiate_path": "/api/deposits/clienthub/initiate/"},
+            {"code": "sitransferhub", "name": "SiTransferHub", "enabled": is_on("sitransferhub_enabled"), "initiate_path": "/api/deposits/sitransferhub/initiate/"},
+            {"code": "usd", "name": "USD Gateway", "enabled": is_on("usd_gateway_enabled"), "initiate_path": "/api/deposits/usd/initiate/"},
+        ]
+
+        if (request.query_params.get("enabled") or "").strip().lower() in ("1", "true", "yes"):
+            methods = [m for m in methods if m["enabled"]]
+
+        return Response(methods)
 

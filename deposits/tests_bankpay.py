@@ -141,7 +141,7 @@ class BankPayInitiateVaTest(TestCase):
         return resp, scrape_mock
 
     def test_initiate_returns_va_fields(self):
-        resp, scrape_mock = self._post("/api/deposits/bankpay/initiate/", dict(VA_DETAIL))
+        resp, scrape_mock = self._post("/api/deposits/orion/initiate/", dict(VA_DETAIL))
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["va_number"], "479401000081562")
         self.assertEqual(resp.data["va_bank"], "BRI Virtual Account")
@@ -160,7 +160,7 @@ class BankPayInitiateVaTest(TestCase):
             "va_bank": "",
             "va_name": "",
         }
-        resp, _ = self._post("/api/deposits/bankpay/initiate-qr/", scraped)
+        resp, _ = self._post("/api/deposits/orion/initiate-qr/", scraped)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["qr_image"], "data:image/png;base64,QUJD")
         self.assertEqual(resp.data["display_amount"], "50861")

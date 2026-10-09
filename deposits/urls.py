@@ -26,6 +26,7 @@ from .views import (
     BankPayDepositInitiateQRView,
     BankPayDepositCallbackView,
     DepositTransactionsListView,
+    DepositMethodsView,
     QRISDepositInitiateView,
     QRISDepositAcceptView,
     QRISDepositRejectView,
@@ -50,10 +51,10 @@ urlpatterns = [
     path('jayapay-ph/callback/', JayapayPhDepositCallbackView.as_view(), name='deposit-jayapay-ph-callback'),
     path('klikpay/initiate/', KlikpayDepositInitiateView.as_view(), name='deposit-klikpay-initiate'),
     path('klikpay/callback/', KlikpayDepositCallbackView.as_view(), name='deposit-klikpay-callback'),
-    path('atpay/initiate/', AtpayDepositInitiateView.as_view(), name='deposit-atpay-initiate'),
-    path('atpay/initiate-va/', AtpayDepositInitiateDirectVAView.as_view(), name='deposit-atpay-initiate-va'),
+    path('nova/initiate/', AtpayDepositInitiateView.as_view(), name='deposit-atpay-initiate'),
+    path('nova/initiate-va/', AtpayDepositInitiateDirectVAView.as_view(), name='deposit-atpay-initiate-va'),
     path('atpay/callback/', AtpayDepositCallbackView.as_view(), name='deposit-atpay-callback'),
-    path('atpay/query/', AtpayDepositQueryView.as_view(), name='deposit-atpay-query'),
+    path('nova/query/', AtpayDepositQueryView.as_view(), name='deposit-atpay-query'),
     path('clienthub/initiate/', ClientHubDepositInitiateView.as_view(), name='deposit-clienthub-initiate'),
     path('clienthub/callback/', ClientHubDepositCallbackView.as_view(), name='deposit-clienthub-callback'),
     path('sitransferhub/initiate/', SiTransferHubDepositInitiateView.as_view(), name='deposit-sitransferhub-initiate'),
@@ -65,8 +66,8 @@ urlpatterns = [
     path('usd/initiate/', UsdGatewayDepositInitiateView.as_view(), name='deposit-usd-initiate'),
     path('usd/callback/', UsdGatewayDepositCallbackView.as_view(), name='deposit-usd-callback'),
     path('usd/callback', UsdGatewayDepositCallbackView.as_view(), name='deposit-usd-callback-noslash'),
-    path('bankpay/initiate/', BankPayDepositInitiateView.as_view(), name='deposit-bankpay-initiate'),
-    path('bankpay/initiate-qr/', BankPayDepositInitiateQRView.as_view(), name='deposit-bankpay-initiate-qr'),
+    path('orion/initiate/', BankPayDepositInitiateView.as_view(), name='deposit-bankpay-initiate'),
+    path('orion/initiate-qr/', BankPayDepositInitiateQRView.as_view(), name='deposit-bankpay-initiate-qr'),
     path('bankpay/callback/', BankPayDepositCallbackView.as_view(), name='deposit-bankpay-callback'),
     path('qris/initiate/', QRISDepositInitiateView.as_view(), name='deposit-qris-initiate'),
     path('qris/accept/', QRISDepositAcceptView.as_view(), name='deposit-qris-accept'),
@@ -74,14 +75,24 @@ urlpatterns = [
     path('reepay/initiate/', ReepayDepositInitiateView.as_view(), name='deposit-reepay-initiate'),
     path('reepay/select-method/', ReepayDepositSelectMethodView.as_view(), name='deposit-reepay-select-method'),
     path('reepay/callback/', ReepayDepositCallbackView.as_view(), name='deposit-reepay-callback'),
-    path('ffpay/initiate/', FfpayDepositInitiateView.as_view(), name='deposit-ffpay-initiate'),
-    path('ffpay/select-method/', FfpayDepositSelectMethodView.as_view(), name='deposit-ffpay-select-method'),
+    path('vega/initiate/', FfpayDepositInitiateView.as_view(), name='deposit-ffpay-initiate'),
+    path('vega/select-method/', FfpayDepositSelectMethodView.as_view(), name='deposit-ffpay-select-method'),
     path('ffpay/callback/', FfpayDepositCallbackView.as_view(), name='deposit-ffpay-callback'),
     path('lpay/initiate/', LpayDepositInitiateView.as_view(), name='deposit-lpay-initiate'),
     path('lpay/callback/', FfpayDepositCallbackView.as_view(), name='deposit-lpay-callback'),
-    path('mgm/initiate/', MgmDepositInitiateView.as_view(), name='deposit-mgm-initiate'),
+    path('lyra/initiate/', MgmDepositInitiateView.as_view(), name='deposit-mgm-initiate'),
     path('mgm/callback/', FfpayDepositCallbackView.as_view(), name='deposit-mgm-callback'),
     path('quenpay/initiate/', QuenPayDepositInitiateView.as_view(), name='deposit-quenpay-initiate'),
     path('quenpay/callback/', QuenPayDepositCallbackView.as_view(), name='deposit-quenpay-callback'),
+    # ------------------------------------------------------------------
+    # TRANSISI (sementara): callback path TIDAK pernah di-rename, hanya
+    # endpoint request. Alias di bawah hanya untuk drain order in-flight
+    # yang notify_url-nya terlanjur dibuat saat window rename (ATPAY &
+    # BankPay mengirim notify_url per-request dari kode). Hapus setelah
+    # tidak ada hit lagi.
+    # ------------------------------------------------------------------
+    path('nova/callback/', AtpayDepositCallbackView.as_view(), name='deposit-atpay-callback-nova-legacy'),
+    path('orion/callback/', BankPayDepositCallbackView.as_view(), name='deposit-bankpay-callback-orion-legacy'),
     path('transactions/', DepositTransactionsListView.as_view(), name='deposit-transactions-list'),
+    path('methods/', DepositMethodsView.as_view(), name='deposit-methods'),
 ]

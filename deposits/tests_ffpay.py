@@ -245,9 +245,9 @@ class FfpayInitiateTest(TestCase):
     def test_initiate_builds_provider_payload(self):
         fake = {"success": True, "data": {"ref_id": "TXN1", "pay_url": "https://pay.test/1", "expires_at": None}}
         cases = [
-            ("/api/deposits/ffpay/initiate/", "FFPAY", "/gateway/charge/create", "method", ""),
+            ("/api/deposits/vega/initiate/", "FFPAY", "/gateway/charge/create", "method", ""),
             ("/api/deposits/lpay/initiate/", "LPAY", "/gateway/lpay/payin", "code", "3560"),
-            ("/api/deposits/mgm/initiate/", "MGM", "/gateway/mgm/qris", "method", "QRCODE"),
+            ("/api/deposits/lyra/initiate/", "MGM", "/gateway/mgm/qris", "method", "QRCODE"),
         ]
         for url, gateway, api_path, key, expected in cases:
             with patch("deposits.views.ffpay_post_json", return_value=(fake, 200)) as mocked:
@@ -267,7 +267,7 @@ class FfpayInitiateTest(TestCase):
         with patch("deposits.views.ffpay_post_json", return_value=(fake, 200)) as mocked, patch(
             "deposits.views._scrape_mgm_payment_page"
         ) as scrape_mock:
-            resp = self.client.post("/api/deposits/mgm/initiate/", {"amount": 50000}, format="json")
+            resp = self.client.post("/api/deposits/lyra/initiate/", {"amount": 50000}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mocked.call_args.args[2], "/gateway/mgm/payin")
         self.assertEqual(mocked.call_args.args[3]["method"], "WALLET")
@@ -288,7 +288,7 @@ class FfpayInitiateTest(TestCase):
         with patch("deposits.views.ffpay_post_json", return_value=(fake, 200)) as mocked, patch(
             "deposits.views._scrape_mgm_payment_page"
         ) as scrape_mock:
-            resp = self.client.post("/api/deposits/mgm/initiate/", {"amount": 50000}, format="json")
+            resp = self.client.post("/api/deposits/lyra/initiate/", {"amount": 50000}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(mocked.call_args.args[2], "/gateway/mgm/qris")
         self.assertEqual(resp.data["pay_data"], "https://platform.test/pay/qr-img/TXN3/abc")
@@ -314,7 +314,7 @@ class FfpayInitiateTest(TestCase):
             "deposits.views._scrape_mgm_payment_page",
             return_value={"qr_image": "data:image/png;base64,QUJD"},
         ) as scrape_mock:
-            resp = self.client.post("/api/deposits/mgm/initiate/", {"amount": 50000}, format="json")
+            resp = self.client.post("/api/deposits/lyra/initiate/", {"amount": 50000}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(resp.data["pay_data"])
         self.assertEqual(resp.data["qr_image"], "data:image/png;base64,QUJD")
@@ -348,7 +348,7 @@ class FfpayInitiateTest(TestCase):
         with patch("deposits.views.ffpay_post_json", return_value=(fake, 200)), patch(
             "deposits.views._scrape_lpay_payment_page"
         ) as scrape_mock:
-            resp = self.client.post("/api/deposits/ffpay/initiate/", {"amount": 50000}, format="json")
+            resp = self.client.post("/api/deposits/vega/initiate/", {"amount": 50000}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertIsNone(resp.data["qr_string"])
         scrape_mock.assert_not_called()
