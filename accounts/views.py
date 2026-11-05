@@ -23,6 +23,7 @@ from django.utils import timezone
 from datetime import datetime, timedelta
 from decimal import Decimal
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse, OpenApiParameter, inline_serializer
+from drf_spectacular.types import OpenApiTypes
 from .serializers import RankLevelSerializer, RankStatusResponseSerializer
 from .models import RankLevel
 from .utils import calculate_user_rank_progress, calculate_user_rank_progress_breakdown, send_whatsapp_otp, check_whatsapp_registered, validate_whatsapp_otp, normalize_phone, is_indonesia_phone, update_user_rank, get_highest_eligible_rank_level, get_rank_evaluation_flags, get_active_member_definition
@@ -377,7 +378,7 @@ class RegisterView(generics.CreateAPIView):
     @extend_schema(
         description='Register a new user account',
         responses={
-            201: OpenApiResponse(
+            201: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='User successfully registered',
                 examples=[
                     OpenApiExample(
@@ -396,7 +397,7 @@ class RegisterView(generics.CreateAPIView):
                     )
                 ]
             ),
-            400: OpenApiResponse(
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Invalid input',
                 examples=[
                     OpenApiExample(
@@ -544,7 +545,7 @@ class CustomAuthToken(ObtainAuthToken):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Login successful',
                 examples=[
                     OpenApiExample(
@@ -564,7 +565,7 @@ class CustomAuthToken(ObtainAuthToken):
                     )
                 ]
             ),
-            400: OpenApiResponse(
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Invalid credentials',
                 examples=[
                     OpenApiExample(
@@ -672,7 +673,7 @@ class LogoutView(APIView):
     @extend_schema(
         description='Logout and invalidate current auth token',
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Logout successful',
                 examples=[
                     OpenApiExample(
@@ -683,7 +684,7 @@ class LogoutView(APIView):
                     )
                 ]
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Unauthorized',
                 examples=[
                     OpenApiExample(
@@ -738,7 +739,7 @@ class ChangePasswordByPhoneView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Password changed successfully',
                 examples=[
                     OpenApiExample(
@@ -747,7 +748,7 @@ class ChangePasswordByPhoneView(APIView):
                     )
                 ]
             ),
-            400: OpenApiResponse(
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Validation error',
                 examples=[
                     OpenApiExample(
@@ -791,7 +792,7 @@ class ResetPasswordWithOTPView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Password berhasil direset',
                 examples=[
                     OpenApiExample(
@@ -1113,7 +1114,7 @@ class AccountInfoView(APIView):
     @extend_schema(
         description='Get current user account information',
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Account information retrieved successfully',
                 examples=[
                     OpenApiExample(
@@ -1140,7 +1141,7 @@ class AccountInfoView(APIView):
                     )
                 ]
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Unauthorized',
                 examples=[
                     OpenApiExample(
@@ -1197,7 +1198,7 @@ class ProfileUpdateView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Profile updated successfully',
                 examples=[
                     OpenApiExample(
@@ -1213,7 +1214,7 @@ class ProfileUpdateView(APIView):
                     )
                 ]
             ),
-            400: OpenApiResponse(
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Validation error',
                 examples=[
                     OpenApiExample(
@@ -1224,7 +1225,7 @@ class ProfileUpdateView(APIView):
                     )
                 ]
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Unauthorized',
                 examples=[
                     OpenApiExample(
@@ -1268,7 +1269,7 @@ class ProfilePhotoUploadView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Foto profil berhasil diupload',
                 examples=[OpenApiExample('Success', value={'avatar': 'https://domain/media/avatars/filename.jpg', 'message': 'Foto profil berhasil diupload.'})]
             ),
@@ -1518,7 +1519,7 @@ class DownlineOverviewView(APIView):
             ),
         ],
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Downline overview retrieved successfully',
                 examples=[
                     OpenApiExample(
@@ -1601,7 +1602,7 @@ class DownlineOverviewView(APIView):
                     )
                 ]
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Unauthorized',
                 examples=[
                     OpenApiExample(
@@ -2136,7 +2137,7 @@ class AdminDecodeApiResponseView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Decoded response',
                 examples=[
                     OpenApiExample(
@@ -2148,7 +2149,7 @@ class AdminDecodeApiResponseView(APIView):
                     )
                 ],
             ),
-            400: OpenApiResponse(
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Invalid payload',
                 examples=[
                     OpenApiExample(
@@ -2278,6 +2279,93 @@ def _balance_stats_cache_key(user, period):
     return f'balance_stats:{hashlib.md5(raw.encode()).hexdigest()}'
 
 
+BALANCE_STATS_PERIODS = ['today', 'yesterday', 'weekly', 'monthly', 'all-time']
+
+
+def _balance_statistics_example(period):
+    """Contoh response statistik saldo untuk satu period."""
+    return {
+        'balance': '1500000.00',
+        'balance_deposit': '500000.00',
+        'balance_hold': '0.00',
+        'total_deposit_completed': '2500000.00',
+        'total_deposit_count': 5,
+        'total_withdraw_completed': '1000000.00',
+        'total_withdraw_count': 2,
+        'total_commission': '75000.00',
+        'profit_commission': '50000.00',
+        'purchase_commission': '25000.00',
+        'interest_total': '120000.00',
+        'total_cashback': '15000.00',
+        'attendance_total': '30000.00',
+        'bonus_total': '20000.00',
+        'missions_total': '35000.00',
+        'total_income': '260000.00',
+        'total_transactions': 42,
+        'period': period,
+        'active_investments_count': 2,
+        'active_products': [
+            {
+                'product_id': 3,
+                'name': 'Gold Plan A',
+                'active_count': 2,
+                'total_quantity': 2,
+                'total_amount': '2000000.00',
+            }
+        ],
+        'active_members_level_1': 4,
+        'active_members_level_2': 7,
+        'active_members_level_3': 3,
+        'active_members_total_1_3': 14,
+    }
+
+
+def _balance_statistics_schema(period=None):
+    """
+    Skema OpenAPI untuk endpoint statistik saldo.
+
+    Dipakai oleh `BalanceStatisticsView` dan lima subclass per-period. Decorator
+    di parent tidak terbaca drf-spectacular bila subclass menimpa `get()`, jadi
+    tiap subclass perlu skemanya sendiri. Kalau `period` None berarti endpoint
+    generik yang menerima `{period}` di path.
+    """
+    label = period or '{period}'
+    parameters = []
+    if period is None:
+        parameters.append(
+            OpenApiParameter(
+                name='period',
+                location=OpenApiParameter.PATH,
+                type=OpenApiTypes.STR,
+                enum=BALANCE_STATS_PERIODS,
+                description="Rentang waktu statistik saldo.",
+            )
+        )
+    return extend_schema(
+        tags=[USER_TAG],
+        summary=f"Statistik saldo periode {label}",
+        description=(
+            f"Statistik saldo user untuk periode `{label}`: saldo saat ini, total "
+            "deposit/withdraw, komisi, interest, cashback, attendance, bonus, "
+            "jumlah transaksi, serta ringkasan investasi dan downline aktif."
+        ),
+        parameters=parameters,
+        responses={
+            200: OpenApiResponse(
+                response=BalanceStatisticsSerializer,
+                description="Statistik saldo user",
+                examples=[
+                    OpenApiExample(
+                        'Success',
+                        summary=f'Contoh statistik saldo periode {label}',
+                        value=_balance_statistics_example(period or 'all-time'),
+                    )
+                ],
+            )
+        },
+    )
+
+
 class BalanceStatisticsView(APIView):
     """
     API untuk mendapatkan statistik balance, deposit, withdraw, dan komisi
@@ -2285,11 +2373,7 @@ class BalanceStatisticsView(APIView):
     """
     permission_classes = [IsAuthenticated]
     
-    @extend_schema(
-        tags=[USER_TAG],
-        description="Statistik saldo (deposit/withdraw/commission/income) untuk period 'today', 'yesterday', 'weekly', 'monthly' atau 'all-time'",
-        responses={200: OpenApiResponse(response=BalanceStatisticsSerializer)},
-    )
+    @_balance_statistics_schema()
     def get(self, request, period=None):
         """
         GET /api/accounts/balance-statistics/{period}/
@@ -2533,6 +2617,8 @@ class BalanceStatisticsView(APIView):
             # Tambahkan total attendance
             'attendance_total': attendance_total,
             'bonus_total': bonus_total,
+            # total hadiah misi yang sudah diklaim
+            'missions_total': missions_total,
             'total_income': total_income,
             'total_cashback': total_cashback,
 
@@ -2560,6 +2646,7 @@ class BalanceStatisticsTodayView(BalanceStatisticsView):
     GET /api/accounts/balance-statistics/today/
     """
     
+    @_balance_statistics_schema('today')
     def get(self, request):
         return super().get(request, period='today')
 
@@ -2570,6 +2657,7 @@ class BalanceStatisticsAllTimeView(BalanceStatisticsView):
     GET /api/accounts/balance-statistics/all-time/
     """
     
+    @_balance_statistics_schema('all-time')
     def get(self, request):
         return super().get(request, period='all-time')
 
@@ -2580,6 +2668,7 @@ class BalanceStatisticsWeeklyView(BalanceStatisticsView):
     GET /api/accounts/balance-statistics/weekly/
     """
     
+    @_balance_statistics_schema('weekly')
     def get(self, request):
         return super().get(request, period='weekly')
 
@@ -2590,6 +2679,7 @@ class BalanceStatisticsMonthlyView(BalanceStatisticsView):
     GET /api/accounts/balance-statistics/monthly/
     """
     
+    @_balance_statistics_schema('monthly')
     def get(self, request):
         return super().get(request, period='monthly')
 
@@ -2600,6 +2690,7 @@ class BalanceStatisticsYesterdayView(BalanceStatisticsView):
     GET /api/accounts/balance-statistics/yesterday/
     """
     
+    @_balance_statistics_schema('yesterday')
     def get(self, request):
         return super().get(request, period='yesterday')
 
@@ -2886,7 +2977,7 @@ class DownlineStatsView(APIView):
                     )
                 ]
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Unauthorized',
                 examples=[
                     OpenApiExample(
@@ -3114,7 +3205,7 @@ class PhoneTokenObtainPairView(TokenObtainPairView):
         summary="Login dengan phone + password (JWT)",
         tags=[USER_TAG],
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description="Login sukses, kembalikan access dan refresh token",
                 examples=[
                     OpenApiExample(
@@ -3135,7 +3226,7 @@ class PhoneTokenObtainPairView(TokenObtainPairView):
                     ),
                 ],
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description="Login gagal",
                 examples=[
                     OpenApiExample(
@@ -3220,9 +3311,11 @@ class EmailTokenObtainPairView(TokenObtainPairView):
 
 class IdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
     """
-    Login dengan satu field `identifier` yang bisa berisi nomor phone atau email.
+    Login dengan satu field `identifier` + `password`.
+    Urutan pencarian:
     - Mengandung '@' -> dicari via email (case-insensitive)
-    - Selain itu     -> dinormalisasi sebagai phone (normalize_phone)
+    - Selain itu     -> dinormalisasi sebagai phone (normalize_phone);
+                        kalau tidak ketemu, dicoba sebagai username.
     """
     identifier = serializers.CharField(write_only=True)
 
@@ -3232,6 +3325,58 @@ class IdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
         # endpoint ini memakai `identifier`, jadi field itu dihapus.
         self.fields.pop(self.username_field, None)
 
+    @staticmethod
+    def _phone_candidates(identifier):
+        """Semua bentuk nomor telepon yang mungkin tersimpan di kolom `phone`."""
+        raw = identifier.strip().replace(' ', '').replace('-', '')
+        candidates = []
+
+        def add(value):
+            if value and value not in candidates:
+                candidates.append(value)
+
+        add(raw)  # apa adanya, menutup data yang sudah dalam format DB
+        normalized = normalize_phone(raw)
+        add(normalized)
+        if normalized.startswith('+'):
+            add(normalized[1:])  # 6285...
+            if normalized.startswith('+62'):
+                add('0' + normalized[3:])  # 0851...
+        return candidates
+
+    def _resolve_by_phone(self, identifier, password):
+        """
+        Cocokkan identifier ke kolom `phone` di semua format yang lazim
+        (08.., 628.., +628..). Nomor lama belum tentu tersimpan ternormalisasi,
+        jadi pencocokan exact milik PhoneOrUsernameBackend saja tidak cukup.
+        """
+        for candidate in self._phone_candidates(identifier):
+            user = User.objects.filter(phone=candidate).first()
+            if user and user.check_password(password):
+                return user
+        return None
+
+    def _resolve_user(self, request, identifier, password):
+        """Kembalikan user yang cocok, atau None kalau identifier/password salah."""
+        if '@' in identifier:
+            try:
+                user = User.objects.get(email__iexact=identifier)
+            except User.DoesNotExist:
+                return None
+            return user if user.check_password(password) else None
+
+        # Phone dicoba lebih dulu supaya identifier yang mirip nomor telepon
+        # tidak pernah "dibajak" oleh username dengan bentuk yang sama.
+        user = self._resolve_by_phone(identifier, password)
+        if user:
+            return user
+
+        user = (
+            User.objects.filter(username=identifier).first()
+            or User.objects.filter(username__iexact=identifier).first()
+        )
+        return user if user and user.check_password(password) else None
+
     def validate(self, attrs):
         identifier = (attrs.get('identifier') or '').strip()
         password = attrs.get('password')
@@ -3239,18 +3384,9 @@ class IdentifierTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise AuthenticationFailed('Please provide both identifier and password')
 
         request = self.context.get('request')
-        if '@' in identifier:
-            try:
-                user = User.objects.get(email__iexact=identifier)
-            except User.DoesNotExist:
-                raise AuthenticationFailed('Invalid phone/email or password')
-            if not user.check_password(password):
-                raise AuthenticationFailed('Invalid phone/email or password')
-        else:
-            phone = normalize_phone(identifier)
-            user = authenticate(request=request, username=phone, password=password) if phone else None
-            if not user:
-                raise AuthenticationFailed('Invalid phone/email or password')
+        user = self._resolve_user(request, identifier, password)
+        if not user:
+            raise AuthenticationFailed('Invalid phone/email/username or password')
 
         enforce_user_access(user)
         ip = _get_request_ip(request) if request is not None else None
@@ -3280,24 +3416,25 @@ class IdentifierTokenObtainPairView(TokenObtainPairView):
     serializer_class = IdentifierTokenObtainPairSerializer
 
     @extend_schema(
-        summary="Login dengan phone atau email + password (JWT)",
+        summary="Login dengan phone, email, atau username + password (JWT)",
         description=(
-            "Kirim `identifier` yang bisa berisi nomor telepon atau email. "
-            "Nilai yang mengandung '@' diproses sebagai email, selain itu diproses sebagai phone."
+            "Kirim `identifier` yang bisa berisi nomor telepon, email, atau username. "
+            "Nilai yang mengandung '@' diproses sebagai email, selain itu dicoba sebagai "
+            "phone lebih dulu, lalu sebagai username."
         ),
         tags=[USER_TAG],
         request={
             'application/json': {
                 'type': 'object',
                 'properties': {
-                    'identifier': {'type': 'string', 'description': 'Nomor telepon atau email'},
+                    'identifier': {'type': 'string', 'description': 'Nomor telepon, email, atau username'},
                     'password': {'type': 'string', 'format': 'password'},
                 },
                 'required': ['identifier', 'password'],
             }
         },
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description="Login sukses, kembalikan access dan refresh token",
                 examples=[
                     OpenApiExample(
@@ -3318,12 +3455,12 @@ class IdentifierTokenObtainPairView(TokenObtainPairView):
                     ),
                 ],
             ),
-            401: OpenApiResponse(
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description="Login gagal",
                 examples=[
                     OpenApiExample(
                         'Error',
-                        value={"detail": "Invalid phone/email or password"},
+                        value={"detail": "Invalid phone/email/username or password"},
                     ),
                 ],
             ),
@@ -3431,9 +3568,9 @@ class WithdrawPinView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(description='PIN set/updated successfully', examples=[]),
-            400: OpenApiResponse(description='Validation error', examples=[]),
-            401: OpenApiResponse(description='Unauthorized', examples=[]),
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, description='PIN set/updated successfully', examples=[]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Validation error', examples=[]),
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Unauthorized', examples=[]),
         }
     )
     def post(self, request):
@@ -3446,8 +3583,8 @@ class WithdrawPinView(APIView):
         tags=[USER_TAG],
         summary='Check if withdrawal PIN is set',
         responses={
-            200: OpenApiResponse(description='PIN status', examples=[]),
-            401: OpenApiResponse(description='Unauthorized', examples=[]),
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, description='PIN status', examples=[]),
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Unauthorized', examples=[]),
         }
     )
     def get(self, request):
@@ -3474,9 +3611,9 @@ class AdminWithdrawPinView(APIView):
             }
         },
         responses={
-            200: OpenApiResponse(description='Withdrawal PIN updated by admin', examples=[]),
-            400: OpenApiResponse(description='Validation error', examples=[]),
-            401: OpenApiResponse(description='Unauthorized', examples=[]),
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Withdrawal PIN updated by admin', examples=[]),
+            400: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Validation error', examples=[]),
+            401: OpenApiResponse(response=OpenApiTypes.OBJECT, description='Unauthorized', examples=[]),
         }
     )
     def post(self, request):

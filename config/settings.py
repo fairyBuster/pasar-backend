@@ -288,6 +288,10 @@ SPECTACULAR_SETTINGS = {
     ''',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+    # Pastikan setiap endpoint punya response schema + contoh response.
+    'POSTPROCESSING_HOOKS': [
+        'config.openapi_postprocess.ensure_schema_and_examples',
+    ],
     'TAGS': [
         {'name': 'User API', 'description': 'Endpoints accessible to regular users'},
         {'name': 'Admin API', 'description': 'Endpoints accessible only to admin users'},
@@ -297,6 +301,9 @@ SPECTACULAR_SETTINGS = {
         'persistAuthorization': True,
         'displayOperationId': False,
         'defaultModelsExpandDepth': -1,
+        # Search box di atas daftar endpoint: filter berdasarkan path, method,
+        # summary, dan tag. Aktifkan dengan mengetik di kotak "Filter by tag".
+        'filter': True,
     }
 }
 
@@ -354,6 +361,14 @@ if APP_DOMAIN:
 # Capacitor/mobile WebView support via regex (e.g., capacitor://localhost)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     origin.strip() for origin in os.environ.get('CORS_ALLOWED_ORIGIN_REGEXES', '^capacitor://localhost$,^https?://localhost(:\d+)?$,^ionic://localhost$').split(',') if origin.strip()
+]
+
+# Frontends in local/staging are served from loopback, a LAN address or the
+# proxy, and each of those changes the Origin header. A public page cannot
+# forge one of these, so allowing them does not widen production exposure.
+CORS_ALLOWED_ORIGIN_REGEXES += [
+    r'^http://(?:localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?$',
+    r'^https?://(?:[a-z0-9-]+\.)*scagerwebsite\.uk(?::\d+)?$',
 ]
 # Optional: allow null origin (e.g., file:// schemes in some WebViews)
 CORS_ALLOW_NULL_ORIGIN = os.environ.get('CORS_ALLOW_NULL_ORIGIN', 'False').lower() == 'true'

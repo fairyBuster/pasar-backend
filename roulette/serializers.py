@@ -33,9 +33,17 @@ class RouletteSpinResponseSerializer(serializers.Serializer):
     tickets_after = serializers.IntegerField()
     prize_id = serializers.IntegerField(allow_null=True)
     prize_name = serializers.CharField(allow_null=True)
-    prize_type = serializers.CharField()
+    prize_type = serializers.CharField(
+        help_text="BALANCE, BALANCE_DEPOSIT, atau NONE (zonk / hadiah fisik)."
+    )
     prize_amount = serializers.CharField()
-    transaction_id = serializers.CharField(allow_null=True)
+    transaction_id = serializers.CharField(
+        allow_null=True,
+        help_text=(
+            "Kode transaksi unik (Transaction.trx_id, bukan primary key), format "
+            "RLT-YYYYMMDDHHMMSS-XXXXXX. Null bila tidak ada hadiah yang dicatat."
+        ),
+    )
 
 
 class RouletteEarnMethodsResponseSerializer(serializers.Serializer):
@@ -102,5 +110,11 @@ class RouletteRedeemResponseSerializer(serializers.Serializer):
     prize_type = serializers.CharField()
     prize_amount = serializers.CharField()
     points_spent = serializers.IntegerField()
-    transaction_id = serializers.CharField(allow_null=True)
+    transaction_id = serializers.CharField(
+        allow_null=True,
+        help_text=(
+            "Kode transaksi unik (Transaction.trx_id, bukan primary key), format "
+            "RLT-YYYYMMDDHHMMSS-XXXXXX. Null bila tidak ada hadiah yang dicatat."
+        ),
+    )
     redemption_id = serializers.IntegerField()

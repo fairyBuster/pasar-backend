@@ -9,6 +9,8 @@ class AccountsConfig(AppConfig):
         from django.db.models.signals import post_save
         from accounts.models import GeneralSetting
         from config import clear_currency_cache
+        # Registers the OpenAPI security schemes for the custom auth classes.
+        from config import openapi_extensions  # noqa: F401
 
         post_save.connect(
             lambda **kwargs: clear_currency_cache(),

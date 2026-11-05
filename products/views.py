@@ -413,7 +413,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         tags=[USER_TAG],
         request=ClaimCashbackSerializer,
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Cashback claimed successfully',
                 examples=[
                     OpenApiExample(
@@ -949,7 +949,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         tags=[USER_TAG],
         request=ClaimProfitSerializer,
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Profit claimed successfully',
                 examples=[
                     OpenApiExample(
@@ -1098,7 +1098,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         tags=[USER_TAG],
         request=None,
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Bulk profit claim processed',
                 examples=[
                     OpenApiExample(
@@ -1239,7 +1239,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
     @extend_schema(
         tags=[USER_TAG],
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description="List investasi yang bisa klaim profit sekarang",
                 examples=[
                     OpenApiExample(
@@ -1315,7 +1315,7 @@ class InvestmentViewSet(viewsets.ModelViewSet):
         tags=[USER_TAG],
         request=ClaimPrincipalSerializer,
         responses={
-            200: OpenApiResponse(
+            200: OpenApiResponse(response=OpenApiTypes.OBJECT, 
                 description='Principal returned successfully',
                 examples=[
                     OpenApiExample(

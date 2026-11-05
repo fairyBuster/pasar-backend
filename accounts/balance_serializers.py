@@ -26,6 +26,8 @@ class BalanceStatisticsSerializer(serializers.Serializer):
     # Tambahan: total attendance credit dari transaksi type 'ATTENDANCE'
     attendance_total = serializers.DecimalField(max_digits=15, decimal_places=2)
     bonus_total = serializers.DecimalField(max_digits=15, decimal_places=2)
+    # Total hadiah misi yang sudah diklaim, dari transaksi type 'MISSIONS'
+    missions_total = serializers.DecimalField(max_digits=15, decimal_places=2)
     total_income = serializers.DecimalField(max_digits=15, decimal_places=2)
     total_transactions = serializers.IntegerField()
     period = serializers.CharField()
