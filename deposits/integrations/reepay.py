@@ -44,13 +44,25 @@ def verify_callback_signature(secret: str, timestamp: str, webhook_path: str, ra
     return hmac.compare_digest(expected, signature.strip().lower())
 
 
-def _build_headers(api_key: str, secret: str, timestamp: str, method: str, path: str, body: str) -> dict:
-    return {
+def _build_headers(
+    api_key: str,
+    secret: str,
+    timestamp: str,
+    method: str,
+    path: str,
+    body: str,
+    merchant_code: str = "",
+) -> dict:
+    headers = {
         "Content-Type": "application/json",
         "X-API-Key": api_key,
         "X-Timestamp": timestamp,
         "X-Signature": build_signature(secret, timestamp, method, path, body),
     }
+    # Yuipay (platform sama) mewajibkan X-Merchant-Code; Reepay tidak memakainya
+    if merchant_code:
+        headers["X-Merchant-Code"] = merchant_code
+    return headers
 
 
 def post_json(
@@ -60,11 +72,12 @@ def post_json(
     payload: dict,
     base_url: str = DEFAULT_API_URL,
     timeout: int = 30,
+    merchant_code: str = "",
 ) -> Tuple[dict, int]:
     """Kirim request POST JSON ke Reepay. Return (response_dict, http_status)."""
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     timestamp = str(int(time.time() * 1000))
-    headers = _build_headers(api_key, secret, timestamp, "POST", path, body)
+    headers = _build_headers(api_key, secret, timestamp, "POST", path, body, merchant_code)
     url = f"{base_url.rstrip('/')}{path}"
     resp = requests.post(url, data=body.encode("utf-8"), headers=headers, timeout=timeout)
     try:
@@ -80,10 +93,11 @@ def get_json(
     path: str,
     base_url: str = DEFAULT_API_URL,
     timeout: int = 30,
+    merchant_code: str = "",
 ) -> Tuple[dict, int]:
     """Kirim request GET ke Reepay. Return (response_dict, http_status)."""
     timestamp = str(int(time.time() * 1000))
-    headers = _build_headers(api_key, secret, timestamp, "GET", path, "")
+    headers = _build_headers(api_key, secret, timestamp, "GET", path, "", merchant_code)
     url = f"{base_url.rstrip('/')}{path}"
     resp = requests.get(url, headers=headers, timeout=timeout)
     try:

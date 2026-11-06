@@ -22,7 +22,7 @@ class DepositMethodsViewTest(TestCase):
         resp = self.client.get("/api/deposits/methods/")
         self.assertEqual(resp.status_code, 200)
         data = {m["code"]: m for m in resp.data}
-        self.assertEqual(len(data), 15)
+        self.assertEqual(len(data), 16)
         self.assertTrue(data["nova"]["enabled"])
         self.assertTrue(data["jayapay"]["enabled"])
         self.assertTrue(data["qris"]["enabled"])
@@ -41,5 +41,5 @@ class DepositMethodsViewTest(TestCase):
         GatewaySettings.objects.all().delete()
         resp = self.client.get("/api/deposits/methods/")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(len(resp.data), 15)
+        self.assertEqual(len(resp.data), 16)
         self.assertFalse(any(m["enabled"] for m in resp.data))

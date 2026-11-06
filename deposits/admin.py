@@ -8,7 +8,7 @@ from django.utils import timezone
 @admin.register(GatewaySettings)
 class GatewaySettingsAdmin(admin.ModelAdmin):
     list_display = (
-        'default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'usd_gateway_min_deposit_amount', 'usd_gateway_max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled', 'updated_at'
+        'default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'usd_gateway_min_deposit_amount', 'usd_gateway_max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled', 'yuipay_enabled', 'updated_at'
     )
     readonly_fields = ('updated_at',)
 
@@ -17,7 +17,7 @@ class GatewaySettingsAdmin(admin.ModelAdmin):
         return not GatewaySettings.objects.exists()
     fieldsets = (
         ('Global', {
-            'fields': ('default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled')
+            'fields': ('default_wallet_type', 'app_domain', 'min_deposit_amount', 'max_deposit_amount', 'jayapay_enabled', 'jayapay_ph_enabled', 'klikpay_enabled', 'usd_gateway_enabled', 'ppaypros_enabled', 'clienthub_enabled', 'sitransferhub_enabled', 'atpay_enabled', 'bankpay_enabled', 'qris_enabled', 'reepay_enabled', 'ffpay_enabled', 'lpay_enabled', 'mgm_enabled', 'quenpay_enabled', 'yuipay_enabled')
         }),
         ('Jayapay', {
             'fields': (
@@ -174,6 +174,17 @@ class GatewaySettingsAdmin(admin.ModelAdmin):
                 'quenpay_secret_key',
             ),
             'description': 'Konfigurasi QuenPay (QRIS Pay-In only). Signed request HMAC-SHA256: X-Quen-Api-Key, X-Quen-Timestamp (unix detik), X-Quen-Nonce, X-Quen-Signature. Timestamp +-5 menit, nonce anti-replay. Callback: /api/deposits/quenpay/callback/.'
+        }),
+        ('Yuipay', {
+            'fields': (
+                'yuipay_api_url',
+                'yuipay_api_key',
+                'yuipay_merchant_code',
+                'yuipay_secret_key',
+                'yuipay_return_url',
+            ),
+            'description': 'Konfigurasi Yuipay (montfara.vip). Auth HMAC-SHA256 via header X-API-Key, X-Merchant-Code, X-Timestamp, X-Signature. '
+                           'Callback: /api/deposits/yuipay/callback/ (dikirim per request lewat callback_url, butuh app_domain terisi).'
         }),
     )
 

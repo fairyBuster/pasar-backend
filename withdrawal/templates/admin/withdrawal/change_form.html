@@ -465,6 +465,52 @@
     {% endif %}
   </div>
 
+  <!-- Yuipay Payout Section -->
+  <div class="module" style="margin-top: 30px; border: 1px solid #ccc; border-radius: 5px; padding: 20px;">
+    <h2>Process via Yuipay</h2>
+    {% if yuipay_payout_enabled %}
+      <form method="post" action="{{ process_yuipay_url }}">
+        {% csrf_token %}
+        <fieldset class="module aligned">
+          <div class="form-row">
+            <div>
+              <label for="id_yp_bank_code">Bank Code</label>
+              <input type="text" id="id_yp_bank_code" name="bank_code" value="{{ yuipay_payout_initial.bank_code }}" required />
+              <p style="margin: 4px 0 0; color: #666;">Kode numerik Yuipay: 014 BCA, 009 BNI, 002 BRI, 008 Mandiri, 022 CIMB, 013 Permata, 011 Danamon, 4510 BSI, 200 BTN, 10003 GoPay, 10002 DANA, 10001 OVO, 10008 ShopeePay, 10009 LinkAja.</p>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_yp_destination_account">Account Number</label>
+              <input type="text" id="id_yp_destination_account" name="destination_account" value="{{ yuipay_payout_initial.destination_account }}" required />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_yp_account_holder_name">Account Holder Name</label>
+              <input type="text" id="id_yp_account_holder_name" name="account_holder_name" value="{{ yuipay_payout_initial.account_holder_name }}" />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div>
+              <label for="id_yp_amount">Amount</label>
+              <input type="number" step="1" id="id_yp_amount" name="amount" value="{{ yuipay_payout_initial.amount }}" required />
+            </div>
+          </div>
+        </fieldset>
+
+        <div class="submit-row">
+          <button type="submit" class="default">Submit to Yuipay</button>
+        </div>
+      </form>
+    {% else %}
+      <p style="color: #999;">Yuipay payout tidak aktif. Aktifkan di WithdrawalSettings dan isi konfigurasi api_key/merchant_code/secret_key.</p>
+    {% endif %}
+  </div>
+
   <!-- FF Pay / LPAY / MGM Payout Section -->
   <div class="module" style="margin-top: 30px; border: 1px solid #ccc; border-radius: 5px; padding: 20px;">
     <h2>Process via FF Pay / LPAY / MGM</h2>

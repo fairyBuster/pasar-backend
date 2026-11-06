@@ -65,6 +65,12 @@ class WithdrawalSettings(models.Model):
     reepay_payout_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
     reepay_payout_secret_key = models.CharField(max_length=255, blank=True, default='', help_text='Secret key untuk HMAC-SHA256 signature payout')
 
+    yuipay_payout_enabled = models.BooleanField(default=False)
+    yuipay_payout_api_url = models.CharField(max_length=255, blank=True, default='https://api.montfara.vip', help_text='Base URL Yuipay')
+    yuipay_payout_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
+    yuipay_payout_merchant_code = models.CharField(max_length=100, blank=True, default='', help_text='X-Merchant-Code (USN) dari dashboard Yuipay')
+    yuipay_payout_secret_key = models.CharField(max_length=255, blank=True, default='', help_text='Secret key untuk HMAC-SHA256 signature payout')
+
     ffpay_payout_enabled = models.BooleanField(default=False, verbose_name='FF Pay payout')
     lpay_payout_enabled = models.BooleanField(default=False, verbose_name='LPAY payout')
     mgm_payout_enabled = models.BooleanField(default=False, verbose_name='MGM payout')
@@ -300,6 +306,21 @@ class ReepayWithdrawal(models.Model):
 
     def __str__(self):
         return f"Reepay payout for Withdrawal #{self.withdrawal.pk}"
+
+
+class YuipayWithdrawal(models.Model):
+    withdrawal = models.OneToOneField(Withdrawal, on_delete=models.CASCADE, related_name='yuipay_withdrawal')
+    request_params = models.JSONField(default=dict)
+    response_payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'withdrawal_yuipay'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Yuipay payout for Withdrawal #{self.withdrawal.pk}"
 
 
 class FfpayWithdrawal(models.Model):

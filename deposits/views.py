@@ -72,6 +72,8 @@ from .integrations.reepay import (
     verify_callback_signature as reepay_verify_callback_signature,
     extract_callback_field as reepay_extract_callback_field,
 )
+# Yuipay memakai skema HMAC-SHA256 yang sama dengan Reepay + header X-Merchant-Code
+from .integrations.yuipay import post_json as yuipay_post_json
 # FF Pay / LPAY / MGM memakai skema HMAC-SHA256 & envelope yang sama dengan Reepay
 from .integrations.reepay import (
     post_json as ffpay_post_json,
@@ -4727,10 +4729,11 @@ def _reepay_verify_callback(request, secret: str) -> bool:
     return reepay_verify_callback_signature(secret, timestamp, webhook_path, raw_body, signature)
 
 
-def _reepay_handle_payment_callback(request, payload: dict):
-    """Proses callback payment.* dari Reepay (deposit)."""
+def _reepay_handle_payment_callback(request, payload: dict, gateway: str = "REEPAY", secret_key: str | None = None):
+    """Proses callback payment.* dari Reepay / Yuipay (deposit)."""
     gs = GatewaySettings.objects.order_by("-updated_at").first()
-    secret_key = (gs.reepay_secret_key or "").strip() if gs else ""
+    if secret_key is None:
+        secret_key = (gs.reepay_secret_key or "").strip() if gs else ""
 
     event = str(reepay_extract_callback_field(payload, "event") or "").strip()
     merchant_ref = str(reepay_extract_callback_field(payload, "merchant_ref") or "").strip()
@@ -4741,7 +4744,7 @@ def _reepay_handle_payment_callback(request, payload: dict):
     sign_valid = _reepay_verify_callback(request, secret_key)
 
     trx = Transaction.objects.filter(trx_id=merchant_ref).first()
-    dep = Deposit.objects.filter(order_num=merchant_ref, gateway="REEPAY").first()
+    dep = Deposit.objects.filter(order_num=merchant_ref, gateway=gateway).first()
 
     if dep:
         cb = dict(payload)
@@ -5000,6 +5003,189 @@ class ReepayDepositSelectMethodView(APIView):
             {"detail": detail_msg or "Gagal memilih metode pembayaran", "provider": resp_data},
             status=status.HTTP_400_BAD_REQUEST,
         )
+
+
+# ============================================================
+# Yuipay Gateway Views (api.montfara.vip, HMAC-SHA256 + X-Merchant-Code)
+# ============================================================
+
+YUIPAY_DEPOSIT_METHODS = ("QRIS", "BRI", "PERMATA", "BNI", "MANDIRI", "CIMB", "DANAMON")
+
+
+class YuipayDepositInitiateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = "deposit_initiate"
+
+    @extend_schema(
+        summary="Inisiasi deposit via Yuipay",
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "example": 100000},
+                    "method": {
+                        "type": "string",
+                        "enum": list(YUIPAY_DEPOSIT_METHODS),
+                        "description": "Kosongkan untuk cashier mode (metode dipilih di halaman Yuipay)",
+                    },
+                    "wallet_type": {"type": "string", "enum": ["BALANCE", "BALANCE_DEPOSIT"], "example": "BALANCE"},
+                    "expiry_period": {"type": "integer", "example": 1440},
+                },
+                "required": ["amount"],
+            }
+        },
+    )
+    def post(self, request):
+        gs = GatewaySettings.objects.order_by("-updated_at").first()
+        enabled = bool(gs and gs.yuipay_enabled)
+        api_url = _strip_backticks((gs.yuipay_api_url or "").strip()) if gs else ""
+        api_key = (gs.yuipay_api_key or "").strip() if gs else ""
+        merchant_code = (gs.yuipay_merchant_code or "").strip() if gs else ""
+        secret_key = (gs.yuipay_secret_key or "").strip() if gs else ""
+        app_domain = _strip_backticks((gs.app_domain or "").strip()).rstrip("/") if gs else ""
+        min_deposit_amount = (gs.min_deposit_amount or Decimal("0")) if gs else Decimal("0")
+        max_deposit_amount = (gs.max_deposit_amount or Decimal("0")) if gs else Decimal("0")
+
+        if not enabled:
+            return Response({"detail": PG_INACTIVE_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+        if not api_url or not api_key or not merchant_code or not secret_key:
+            return Response({"detail": "Konfigurasi Yuipay belum lengkap"}, status=status.HTTP_400_BAD_REQUEST)
+        if not app_domain:
+            return Response({"detail": "Konfigurasi domain untuk callback belum diisi"}, status=status.HTTP_400_BAD_REQUEST)
+
+        wallet_type = (request.data.get("wallet_type") or (gs.default_wallet_type if gs else "") or "BALANCE").strip().upper()
+        if wallet_type not in ("BALANCE", "BALANCE_DEPOSIT"):
+            return Response({"detail": "wallet_type tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
+
+        method = str(request.data.get("method") or "").strip().upper()
+        if method and method not in YUIPAY_DEPOSIT_METHODS:
+            return Response(
+                {"detail": f"method tidak valid (pilih: {', '.join(YUIPAY_DEPOSIT_METHODS)})"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        amount_raw = request.data.get("amount")
+        try:
+            amount = Decimal(str(amount_raw)).quantize(Decimal("0.01"))
+            if amount <= 0:
+                raise InvalidOperation()
+        except Exception:
+            return Response({"detail": "amount tidak valid"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if min_deposit_amount and min_deposit_amount > 0 and amount < min_deposit_amount:
+            return Response({"detail": f"Minimal deposit adalah {min_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST)
+        if max_deposit_amount and max_deposit_amount > 0 and amount > max_deposit_amount:
+            return Response({"detail": f"Maksimal deposit adalah {max_deposit_amount}"}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+        order_num = f"DYP{_now_wib().strftime('%y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+        # Yuipay hanya menerima nominal integer IDR
+        amount_int = int(round(float(amount)))
+
+        trx = Transaction.objects.create(
+            user=user,
+            product=None,
+            type="DEPOSIT",
+            amount=amount,
+            currency_code="IDR",
+            description=f"Deposit via Yuipay ({wallet_type})",
+            status="PENDING",
+            wallet_type=wallet_type,
+            trx_id=order_num,
+        )
+
+        payload = {
+            "amount": amount_int,
+            "method": method,
+            "merchant_ref": order_num,
+            "customer_name": (user.full_name or user.username or "")[:100],
+            "customer_email": (getattr(user, "email", "") or "")[:100],
+            "customer_phone": (getattr(user, "phone", "") or "")[:32],
+            "description": f"Deposit Yuipay ({wallet_type})"[:100],
+            # Yuipay hanya mengirim callback bila callback_url diisi per request
+            "callback_url": f"https://{app_domain}/api/deposits/yuipay/callback/",
+        }
+        return_url = _strip_backticks((gs.yuipay_return_url or "").strip()) if gs else ""
+        if return_url:
+            payload["return_url"] = return_url
+        expiry_period = request.data.get("expiry_period")
+        if expiry_period is not None:
+            try:
+                payload["expiry_period"] = int(expiry_period)
+            except Exception:
+                pass
+
+        dep = Deposit.objects.create(
+            user=user,
+            gateway="YUIPAY",
+            order_num=order_num,
+            amount=amount,
+            amount_currency_code="IDR",
+            wallet_type=wallet_type,
+            status="PENDING",
+            transaction=trx,
+            request_params=payload,
+        )
+
+        resp_data, _http_status = yuipay_post_json(
+            api_key, merchant_code, secret_key, "/merchant/payment/create", payload, base_url=api_url
+        )
+
+        dep.response_payload = resp_data
+        dep.save(update_fields=["response_payload"])
+
+        if resp_data.get("success"):
+            data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+            pay_url = (data.get("pay_url") or "").strip()
+            ref_id = (data.get("ref_id") or "").strip()
+            if pay_url:
+                dep.payment_url = pay_url
+                dep.save(update_fields=["payment_url"])
+
+            return Response(
+                {
+                    "order_num": order_num,
+                    "ref_id": ref_id,
+                    "amount": amount_int,
+                    "method": (data.get("method") or method).strip(),
+                    "pay_url": pay_url or None,
+                    "pay_data": (data.get("pay_data") or "").strip() or None,
+                    "pay_data_type": (data.get("pay_data_type") or "").strip() or None,
+                    "expires_at": data.get("expires_at"),
+                    "provider": resp_data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        _ppaypros_mark_deposit_failed(trx, dep)
+
+        detail_msg = (
+            resp_data.get("message")
+            or resp_data.get("detail")
+            or resp_data.get("msg")
+            or ""
+        )
+        if isinstance(detail_msg, str) and _looks_like_html(detail_msg):
+            detail_msg = "Layanan sedang tidak tersedia"
+
+        return Response(
+            {"detail": detail_msg or "Yuipay payin gagal", "provider": resp_data},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class YuipayDepositCallbackView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_scope = "gateway_callback"
+
+    @extend_schema(summary="Callback Yuipay untuk update status deposit")
+    def post(self, request):
+        payload = _reepay_callback_payload(request)
+        gs = GatewaySettings.objects.order_by("-updated_at").first()
+        secret_key = (gs.yuipay_secret_key or "").strip() if gs else ""
+        _reepay_handle_payment_callback(request, payload, gateway="YUIPAY", secret_key=secret_key)
+        return HttpResponse("OK", content_type="text/plain")
 
 
 # ============================================================
@@ -5671,6 +5857,7 @@ class DepositMethodsView(APIView):
             {"code": "lpay", "name": "LPAY", "enabled": is_on("lpay_enabled"), "initiate_path": "/api/deposits/lpay/initiate/"},
             {"code": "lyra", "name": "MGM", "enabled": is_on("mgm_enabled"), "initiate_path": "/api/deposits/lyra/initiate/"},
             {"code": "quenpay", "name": "QuenPay", "enabled": is_on("quenpay_enabled"), "initiate_path": "/api/deposits/quenpay/initiate/"},
+            {"code": "yuipay", "name": "Yuipay", "enabled": is_on("yuipay_enabled"), "initiate_path": "/api/deposits/yuipay/initiate/"},
             {"code": "ppaypros", "name": "PPayPros", "enabled": is_on("ppaypros_enabled"), "initiate_path": "/api/deposits/ppaypros/initiate/"},
             {"code": "clienthub", "name": "ClientHub", "enabled": is_on("clienthub_enabled"), "initiate_path": "/api/deposits/clienthub/initiate/"},
             {"code": "sitransferhub", "name": "SiTransferHub", "enabled": is_on("sitransferhub_enabled"), "initiate_path": "/api/deposits/sitransferhub/initiate/"},

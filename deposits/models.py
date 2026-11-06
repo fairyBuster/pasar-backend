@@ -123,6 +123,14 @@ class GatewaySettings(models.Model):
     lpay_code = models.CharField(max_length=32, blank=True, default='3560', help_text='Kode channel LPAY, contoh: 3560 (QRIS)')
     mgm_method = models.CharField(max_length=16, blank=True, default='QRCODE', help_text='Metode MGM: QRCODE (QRIS) atau WALLET (e-wallet)')
 
+    # Yuipay (montfara.vip) pay-in
+    yuipay_enabled = models.BooleanField(default=False)
+    yuipay_api_url = models.CharField(max_length=255, blank=True, default='https://api.montfara.vip', help_text='Base URL Yuipay')
+    yuipay_api_key = models.CharField(max_length=255, blank=True, default='', help_text='X-API-Key merchant (ak_...)')
+    yuipay_merchant_code = models.CharField(max_length=100, blank=True, default='', help_text='X-Merchant-Code (USN) dari dashboard Yuipay')
+    yuipay_secret_key = models.CharField(max_length=255, blank=True, default='', help_text='Secret key untuk HMAC-SHA256 signature')
+    yuipay_return_url = models.CharField(max_length=512, blank=True, default='', help_text='URL redirect setelah pembayaran selesai (opsional)')
+
     # QuenPay (Quen Payment) QRIS Pay-In - signed request HMAC-SHA256
     quenpay_enabled = models.BooleanField(default=False)
     quenpay_api_url = models.CharField(max_length=255, blank=True, default='', help_text='Host base URL QuenPay (contoh https://quenpayment.com), tanpa /api/v1')
@@ -261,6 +269,7 @@ class Deposit(models.Model):
         ('LPAY', 'LPAY'),
         ('MGM', 'MGM Pay'),
         ('QUENPAY', 'QuenPay'),
+        ('YUIPAY', 'Yuipay'),
     ]
     WALLET_CHOICES = [
         ('BALANCE', 'Balance'),

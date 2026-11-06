@@ -811,3 +811,24 @@ class ClaimHistory(models.Model):
         db_table = 'claim_history'
         ordering = ['-created_at']
         unique_together = ['investment', 'claim_number']
+
+
+class CoinPriceSnapshot(models.Model):
+    """Harga harian coin (USD) untuk grafik produk.
+
+    Disimpan lokal supaya grafik tetap bisa disajikan saat sumber eksternal
+    (CoinGecko) kena rate limit.
+    """
+    coin = models.CharField(max_length=20, db_index=True, help_text='Simbol coin, mis. BTC')
+    day = models.DateField()
+    price_usd = models.DecimalField(max_digits=28, decimal_places=12)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.coin} {self.day}: {self.price_usd}"
+
+    class Meta:
+        db_table = 'coin_price_snapshots'
+        ordering = ['day']
+        unique_together = ['coin', 'day']
+

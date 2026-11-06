@@ -37,6 +37,26 @@ def _now_in_zone(tz):
         return timezone.localtime(now, tz)
     return now
 
+
+def _usd_to_idr_rate():
+    """Kurs IDR per 1 USD dari General Setting Currency; None kalau belum diatur."""
+    from accounts.models import GeneralSetting
+
+    gs = GeneralSetting.objects.order_by('-updated_at').first()
+    if not gs:
+        return None
+    if (gs.currency_code or '').strip().upper() != 'IDR':
+        return None
+    if (gs.secondary_currency_code or '').strip().upper() != 'USD':
+        return None
+    try:
+        per_main = Decimal(str(gs.secondary_rate_per_main or 0))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if per_main <= 0:
+        return None
+    return (Decimal('1') / per_main).quantize(Decimal('0.000001'))
+
 PRODUCTS_LIST_CACHE_TTL = 120  # detik; key fingerprint bikin cache "rilis" sendiri saat data produk berubah
 # ponytail: TTL cuma jaring pengaman untuk perubahan yang tidak terlihat fingerprint
 # (file gambar produk ditambah/dihapus tanpa simpan row Product). Upgrade path: Redis +
@@ -531,6 +551,61 @@ class ProductViewSet(viewsets.ModelViewSet):
             'present_images_count': present,
             'missing_images_count': len(missing),
             'missing_images': missing,
+        })
+
+    @extend_schema(
+        tags=[USER_TAG],
+        description=(
+            'Grafik harga coin produk untuk 7/14/30/90 hari. '
+            'Kalau CoinGecko kena rate limit, dipakai harga harian terakhir yang tersimpan.'
+        ),
+        parameters=[
+            OpenApiParameter(
+                'days', OpenApiTypes.INT, OpenApiParameter.QUERY, default=7,
+                description='7, 14, 30, atau 90 hari',
+                enum=[7, 14, 30, 90],
+            )
+        ],
+        responses={200: OpenApiResponse(description='Series harga harian (USD + IDR)')},
+    )
+    @action(detail=True, methods=['get'], url_path='chart')
+    def chart(self, request, pk=None):
+        from .crypto_prices import CHART_DAYS, get_chart
+
+        product = self.get_object()
+        try:
+            days = int(request.query_params.get('days', CHART_DAYS[0]))
+        except (TypeError, ValueError):
+            days = 0
+        if days not in CHART_DAYS:
+            return Response(
+                {'detail': f'days harus salah satu dari {list(CHART_DAYS)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        result = get_chart(product.name, days)
+        if result is None:
+            return Response(
+                {'detail': f"Grafik tidak tersedia untuk produk '{product.name}'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        rows, source = result
+        idr_rate = _usd_to_idr_rate()
+        series = []
+        for row in rows:
+            item = {'day': row['day'], 'price_usd': float(row['price_usd'])}
+            if idr_rate:
+                item['price_idr'] = float((row['price_usd'] * idr_rate).quantize(Decimal('0.01')))
+            series.append(item)
+
+        return Response({
+            'product_id': product.id,
+            'symbol': product.name,
+            'days': days,
+            'source': source,
+            'usd_idr_rate': float(idr_rate.quantize(Decimal('0.01'))) if idr_rate else None,
+            'series': series,
         })
 
     def _process_cashback(self, buyer, product, purchase_amount, original_transaction):

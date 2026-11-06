@@ -3,7 +3,7 @@ from django.conf import settings
 from django.urls import path, reverse
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
-from .models import Withdrawal, WithdrawalSettings, WithdrawalJayapay, WithdrawalService, UsdPayoutWithdrawal, JayapayPhPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal, FfpayWithdrawal
+from .models import Withdrawal, WithdrawalSettings, WithdrawalJayapay, WithdrawalService, UsdPayoutWithdrawal, JayapayPhPayoutWithdrawal, PPayProsWithdrawal, AtpayWithdrawal, BankPayWithdrawal, ReepayWithdrawal, YuipayWithdrawal, FfpayWithdrawal
 from .integrations.jayapay import build_params, sign_params, sign_params_legacy, send_cash_request
 from .integrations.jayapay_banks import JAYAPAY_BANKS
 from .integrations.jayapay_ph_banks import JAYAPAY_PH_PAYOUT_BANKS
@@ -14,8 +14,10 @@ from deposits.integrations.ppaypros import amount_to_points as ppaypros_amount_t
 from deposits.integrations.atpay import build_bank_code_payload as atpay_build_bank_code_payload, build_payout_payload as atpay_build_payout_payload, build_payout_query_payload as atpay_build_payout_query_payload, map_payout_trade_status as atpay_map_payout_trade_status, normalize_amount as atpay_normalize_amount, normalize_sign_type as atpay_normalize_sign_type, post_json as atpay_post_json, sign_payload as atpay_sign_payload, verify_payload as atpay_verify_payload
 from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign, post_form as bankpay_post_form, build_payout_payload as bankpay_build_payout_payload, build_payout_order_id as bankpay_build_payout_order_id, fetch_bank_list as bankpay_fetch_bank_list, resolve_bankpay_bank as bankpay_resolve_bank, BANKPAY_BANK_LIST
 from deposits.integrations.reepay import post_json as reepay_post_json
+from deposits.integrations.yuipay import post_json as yuipay_post_json
 from .integrations.ffpay import FFPAY_POPULAR_BANKS, ffpay_payout_bank_code
-from .views import FFPAY_PAYOUT_WALLETS
+from .integrations.yuipay import yuipay_bank_code
+from .views import FFPAY_PAYOUT_WALLETS, _resolve_app_domain
 from django.utils.html import format_html
 import json
 import logging
@@ -155,7 +157,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
     list_filter = ('status', 'created_at')
     search_fields = ('user__phone', 'bank_account__account_number')
     readonly_fields = ('created_at', 'updated_at')
-    actions = ['process_withdrawal_jayapay', 'process_withdrawal_bankpay', 'process_withdrawal_reepay']
+    actions = ['process_withdrawal_jayapay', 'process_withdrawal_bankpay', 'process_withdrawal_reepay', 'process_withdrawal_yuipay']
     change_form_template = 'admin/withdrawal/change_form.html'
     autocomplete_fields = ('user', 'bank_account', 'transaction')
     list_select_related = ('user', 'bank_account', 'transaction', 'withdrawal_service')
@@ -219,6 +221,11 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 '<int:pk>/process-reepay/',
                 self.admin_site.admin_view(self.process_reepay_view),
                 name='withdrawal_withdrawal_process_reepay',
+            ),
+            path(
+                '<int:pk>/process-yuipay/',
+                self.admin_site.admin_view(self.process_yuipay_view),
+                name='withdrawal_withdrawal_process_yuipay',
             ),
             path(
                 '<int:pk>/process-ffpay/',
@@ -1005,6 +1012,109 @@ class WithdrawalAdmin(admin.ModelAdmin):
 
         return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
 
+    def process_yuipay_view(self, request, pk: int):
+        try:
+            wd = Withdrawal.objects.select_related('bank_account__bank', 'user', 'transaction').get(pk=pk)
+        except Withdrawal.DoesNotExist:
+            self.message_user(request, 'Withdrawal tidak ditemukan', level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_changelist'))
+
+        gs = WithdrawalSettings.objects.order_by("-updated_at").first()
+        enabled = bool(gs and gs.yuipay_payout_enabled)
+        api_url = (gs.yuipay_payout_api_url or "").strip() if gs else ""
+        api_key = (gs.yuipay_payout_api_key or "").strip() if gs else ""
+        merchant_code = (gs.yuipay_payout_merchant_code or "").strip() if gs else ""
+        secret_key = (gs.yuipay_payout_secret_key or "").strip() if gs else ""
+        app_domain = _resolve_app_domain(gs)
+
+        if not enabled:
+            self.message_user(request, 'Yuipay payout tidak aktif', level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+        if not api_url or not api_key or not merchant_code or not secret_key:
+            self.message_user(request, 'Konfigurasi Yuipay payout belum lengkap', level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+        if not app_domain:
+            self.message_user(request, 'Konfigurasi domain untuk callback belum diisi', level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+        if request.method == "POST":
+            requested_bank_code = (
+                request.POST.get("bank_code")
+                or (getattr(wd.bank_account.bank, "code", "") if wd.bank_account else "")
+            ).strip()
+            bank_code = yuipay_bank_code(requested_bank_code)
+            if not bank_code:
+                self.message_user(request, f'Bank code {requested_bank_code or "-"} belum didukung untuk payout Yuipay', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            destination_account = (request.POST.get("destination_account") or (wd.bank_account.account_number if wd.bank_account else "")).strip()
+            account_holder_name = (request.POST.get("account_holder_name") or (wd.bank_account.account_name if wd.bank_account else "")).strip()
+            amount_raw = (request.POST.get("amount") or "").strip() or str(wd.net_amount or wd.amount)
+
+            if not destination_account or not amount_raw:
+                self.message_user(request, 'Account Number dan Amount wajib diisi', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            try:
+                amount = Decimal(str(amount_raw))
+                if amount <= 0:
+                    raise InvalidOperation()
+            except Exception:
+                self.message_user(request, 'Amount tidak valid', level=messages.ERROR)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            amount_int = int(round(float(amount)))
+            if amount_int < YUIPAY_PAYOUT_MIN_AMOUNT or amount_int > YUIPAY_PAYOUT_MAX_AMOUNT:
+                self.message_user(
+                    request,
+                    f'Nominal payout Yuipay harus antara {YUIPAY_PAYOUT_MIN_AMOUNT} dan {YUIPAY_PAYOUT_MAX_AMOUNT}',
+                    level=messages.ERROR,
+                )
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            merchant_ref = wd.transaction.trx_id if wd.transaction else f"WYP{wd.id}{int(time.time())}"
+            payload = {
+                "amount": amount_int,
+                "destination_account": destination_account,
+                "bank_code": bank_code,
+                "account_holder_name": account_holder_name[:100],
+                "merchant_ref": merchant_ref,
+                "callback_url": f"https://{app_domain}/api/withdrawals/yuipay/callback/",
+            }
+
+            trace, _ = YuipayWithdrawal.objects.get_or_create(withdrawal=wd, defaults={"request_params": payload})
+            if trace and not trace.request_params:
+                trace.request_params = payload
+                trace.save(update_fields=["request_params"])
+
+            resp_data, _ = yuipay_post_json(
+                api_key, merchant_code, secret_key, "/merchant/withdraw/create", payload, base_url=api_url
+            )
+
+            if trace:
+                stored = trace.response_payload if isinstance(trace.response_payload, dict) else {}
+                stored["initiate"] = _redact_for_log(resp_data)
+                trace.response_payload = stored
+                trace.save(update_fields=["response_payload"])
+
+            if resp_data.get("success"):
+                data = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+                ref_id = (data.get("ref_id") or "").strip()
+                if ref_id:
+                    note = f"Yuipay ref_id: {ref_id}"
+                    wd.note = f"{note}\n{wd.note}" if wd.note else note
+                    wd.save(update_fields=["note"])
+                wd.status = 'PROCESSING'
+                wd.save(update_fields=['status'])
+                self.message_user(request, f"Withdrawal #{wd.id} dikirim ke Yuipay", level=messages.SUCCESS)
+                return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+            detail_msg = resp_data.get("message") or resp_data.get("detail") or resp_data.get("msg") or "Yuipay payout gagal"
+            self.message_user(request, f"Yuipay gagal: {detail_msg}", level=messages.ERROR)
+            return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
+        return redirect(reverse('admin:withdrawal_withdrawal_change', args=(wd.id,)))
+
     def process_ffpay_view(self, request, pk: int):
         try:
             wd = Withdrawal.objects.select_related('bank_account__bank', 'user', 'transaction').get(pk=pk)
@@ -1241,6 +1351,14 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     'amount': str(obj.net_amount or obj.amount),
                 },
                 'process_reepay_url': reverse('admin:withdrawal_withdrawal_process_reepay', args=(obj.id,)),
+                'yuipay_payout_enabled': bool(gs and gs.yuipay_payout_enabled),
+                'yuipay_payout_initial': {
+                    'bank_code': wd_bank_code,
+                    'destination_account': obj.bank_account.account_number if obj.bank_account else '',
+                    'account_holder_name': obj.bank_account.account_name if obj.bank_account else '',
+                    'amount': str(obj.net_amount or obj.amount),
+                },
+                'process_yuipay_url': reverse('admin:withdrawal_withdrawal_process_yuipay', args=(obj.id,)),
                 'ffpay_payout_enabled': any(bool(gs and getattr(gs, cfg["flag"], False)) for cfg in FFPAY_PAYOUT_WALLETS.values()),
                 'ffpay_wallets': [
                     {
@@ -1486,6 +1604,85 @@ class WithdrawalAdmin(admin.ModelAdmin):
             self.message_user(request, f"Berhasil memproses {processed} withdrawal via Reepay.", level=messages.SUCCESS)
     process_withdrawal_reepay.short_description = 'Process via Reepay'
 
+    def process_withdrawal_yuipay(self, request, queryset):
+        gs = WithdrawalSettings.objects.order_by("-updated_at").first()
+        enabled = bool(gs and gs.yuipay_payout_enabled)
+        api_url = (gs.yuipay_payout_api_url or "").strip() if gs else ""
+        api_key = (gs.yuipay_payout_api_key or "").strip() if gs else ""
+        merchant_code = (gs.yuipay_payout_merchant_code or "").strip() if gs else ""
+        secret_key = (gs.yuipay_payout_secret_key or "").strip() if gs else ""
+        app_domain = _resolve_app_domain(gs)
+
+        if not enabled:
+            self.message_user(request, 'Yuipay payout tidak aktif', level=messages.ERROR)
+            return
+        if not api_url or not api_key or not merchant_code or not secret_key:
+            self.message_user(request, 'Konfigurasi Yuipay payout belum lengkap', level=messages.ERROR)
+            return
+        if not app_domain:
+            self.message_user(request, 'Konfigurasi domain untuk callback belum diisi', level=messages.ERROR)
+            return
+
+        processed = 0
+        for wd in queryset.select_related('bank_account__bank', 'transaction'):
+            if wd.status not in ('PENDING', 'PROCESSING'):
+                self.message_user(request, f"Withdrawal #{wd.id} dilewati: status {wd.status}", level=messages.WARNING)
+                continue
+            if not wd.bank_account:
+                self.message_user(request, f"Withdrawal #{wd.id} gagal: tidak ada bank_account", level=messages.ERROR)
+                continue
+
+            try:
+                bank = wd.bank_account.bank
+                bank_code = yuipay_bank_code(getattr(bank, "code", "") or "")
+                if not bank_code:
+                    self.message_user(request, f"Withdrawal #{wd.id} dilewati: bank {getattr(bank, 'name', '') or '-'} belum didukung Yuipay", level=messages.WARNING)
+                    continue
+                net = wd.net_amount if wd.net_amount and wd.net_amount > 0 else (wd.amount - wd.fee if wd.fee else wd.amount)
+                amount_int = int(round(float(net if net else wd.amount)))
+                if amount_int < YUIPAY_PAYOUT_MIN_AMOUNT or amount_int > YUIPAY_PAYOUT_MAX_AMOUNT:
+                    self.message_user(
+                        request,
+                        f"Withdrawal #{wd.id} dilewati: nominal harus antara {YUIPAY_PAYOUT_MIN_AMOUNT} dan {YUIPAY_PAYOUT_MAX_AMOUNT}",
+                        level=messages.WARNING,
+                    )
+                    continue
+                merchant_ref = getattr(getattr(wd, "transaction", None), "trx_id", None) or f"WYP{wd.pk}{int(time.time())}"
+
+                payload = {
+                    "amount": amount_int,
+                    "destination_account": wd.bank_account.account_number or "",
+                    "bank_code": bank_code,
+                    "account_holder_name": (wd.bank_account.account_name or "")[:100],
+                    "merchant_ref": merchant_ref,
+                    "callback_url": f"https://{app_domain}/api/withdrawals/yuipay/callback/",
+                }
+
+                resp, _ = yuipay_post_json(api_key, merchant_code, secret_key, "/merchant/withdraw/create", payload, base_url=api_url)
+
+                trace, _ = YuipayWithdrawal.objects.get_or_create(withdrawal=wd, defaults={"request_params": payload})
+                if trace:
+                    if not trace.request_params:
+                        trace.request_params = payload
+                    stored = trace.response_payload if isinstance(trace.response_payload, dict) else {}
+                    stored["initiate"] = _redact_for_log(resp)
+                    trace.response_payload = stored
+                    trace.save(update_fields=["request_params", "response_payload"])
+
+                if resp.get("success"):
+                    wd.status = 'PROCESSING'
+                    wd.save()
+                    processed += 1
+                    self.message_user(request, f"Withdrawal #{wd.id} dikirim ke Yuipay", level=messages.SUCCESS)
+                else:
+                    self.message_user(request, f"Withdrawal #{wd.id} gagal: {resp.get('message') or resp.get('detail') or resp.get('msg') or resp}", level=messages.ERROR)
+            except Exception as e:
+                self.message_user(request, f"Withdrawal #{wd.id} gagal dikirim: {e}", level=messages.ERROR)
+
+        if processed:
+            self.message_user(request, f"Berhasil memproses {processed} withdrawal via Yuipay.", level=messages.SUCCESS)
+    process_withdrawal_yuipay.short_description = 'Process via Yuipay'
+
 
 @admin.register(WithdrawalJayapay)
 class WithdrawalJayapayAdmin(WithdrawalAdmin):
@@ -1511,6 +1708,7 @@ class WithdrawalSettingsAdmin(admin.ModelAdmin):
         'atpay_payout_enabled',
         'bankpay_payout_enabled',
         'reepay_payout_enabled',
+        'yuipay_payout_enabled',
         'ffpay_payout_enabled',
         'lpay_payout_enabled',
         'mgm_payout_enabled',
@@ -1597,6 +1795,21 @@ class WithdrawalSettingsAdmin(admin.ModelAdmin):
                 'reepay_payout_api_url',
                 'reepay_payout_api_key',
                 'reepay_payout_secret_key',
+            )
+        }),
+        ('Yuipay Payout', {
+            'description': (
+                'Auth HMAC-SHA256 via header X-API-Key, X-Merchant-Code, X-Timestamp, X-Signature. '
+                'Callback disbursement dikirim ke `/api/withdrawals/yuipay/callback/` (butuh `app_domain` terisi). '
+                'Hanya 14 bank/e-wallet resmi Yuipay yang didukung (BCA, BNI, BRI, Mandiri, CIMB, Permata, '
+                'Danamon, BSI, BTN, OVO, DANA, GoPay, ShopeePay, LinkAja).'
+            ),
+            'fields': (
+                'yuipay_payout_enabled',
+                'yuipay_payout_api_url',
+                'yuipay_payout_api_key',
+                'yuipay_payout_merchant_code',
+                'yuipay_payout_secret_key',
             )
         }),
         ('FF Pay Payout (FF Pay / LPAY / MGM)', {

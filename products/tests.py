@@ -8,7 +8,8 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from .models import Investment, Product, Transaction
+from .crypto_prices import get_chart
+from .models import CoinPriceSnapshot, Investment, Product, Transaction
 
 
 @override_settings(BYPASS_DOMAIN_IP_SECURITY=True)
@@ -476,3 +477,35 @@ class TransactionsListCacheTest(TestCase):
             fourth = self.client.get("/api/transactions/")
             statuses = {row["trx_id"]: row["status"] for row in fourth.data["results"]}
             self.assertEqual(statuses["TRX-CACHE-001"], "COMPLETED")
+
+
+class CoinChartFallbackTest(TestCase):
+    """Grafik coin harus tetap tampil dari snapshot saat CoinGecko rate limit."""
+
+    def test_429_pakai_harga_tersimpan(self):
+        day = timezone.now().date() - timedelta(days=1)
+        CoinPriceSnapshot.objects.create(coin="BTC", day=day, price_usd=Decimal("101.5"))
+        # paksa stale supaya get_chart mencoba upstream
+        CoinPriceSnapshot.objects.update(updated_at=timezone.now() - timedelta(hours=2))
+
+        with patch("products.crypto_prices.requests.get") as mocked:
+            mocked.return_value.status_code = 429
+            rows, source = get_chart("BTC", 7)
+
+        self.assertEqual(source, "cache")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["price_usd"], Decimal("101.5"))
+
+    def test_data_masih_fresh_tidak_tembak_upstream(self):
+        CoinPriceSnapshot.objects.create(coin="BTC", day=timezone.now().date(), price_usd=Decimal("100"))
+
+        with patch("products.crypto_prices.requests.get") as mocked:
+            rows, source = get_chart("BTC", 7)
+
+        mocked.assert_not_called()
+        self.assertEqual(source, "cache")
+        self.assertEqual(len(rows), 1)
+
+    def test_coin_tanpa_mapping(self):
+        self.assertIsNone(get_chart("TIDAKADA", 7))
+

@@ -40,6 +40,8 @@ from .views import (
     MgmDepositInitiateView,
     QuenPayDepositInitiateView,
     QuenPayDepositCallbackView,
+    YuipayDepositInitiateView,
+    YuipayDepositCallbackView,
 )
 
 urlpatterns = [
@@ -84,6 +86,8 @@ urlpatterns = [
     path('mgm/callback/', FfpayDepositCallbackView.as_view(), name='deposit-mgm-callback'),
     path('quenpay/initiate/', QuenPayDepositInitiateView.as_view(), name='deposit-quenpay-initiate'),
     path('quenpay/callback/', QuenPayDepositCallbackView.as_view(), name='deposit-quenpay-callback'),
+    path('yuipay/initiate/', YuipayDepositInitiateView.as_view(), name='deposit-yuipay-initiate'),
+    path('yuipay/callback/', YuipayDepositCallbackView.as_view(), name='deposit-yuipay-callback'),
     # ------------------------------------------------------------------
     # TRANSISI (sementara): callback path TIDAK pernah di-rename, hanya
     # endpoint request. Alias di bawah hanya untuk drain order in-flight
