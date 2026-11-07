@@ -6,6 +6,9 @@ Payout hanya mendukung 14 tujuan di bawah; kode lain ditolak sebelum request.
 
 Sumber: daftar bank/e-wallet pada dokumentasi Yuipay (api.montfara.vip).
 """
+from urllib.parse import quote
+
+from deposits.integrations.yuipay import DEFAULT_API_URL, get_json
 
 # kode tujuan payout yang didukung Yuipay
 YUIPAY_BANK_CODES = {
@@ -28,4 +31,13 @@ YUIPAY_BANK_CODES = {
 
 def yuipay_bank_code(app_code: str) -> str:
     """Kembalikan kode payout Yuipay, atau '' bila bank tidak didukung."""
-    return YUIPAY_BANK_CODES.get((app_code or "").strip(), "")
+    code = (app_code or "").strip()
+    return code if code in YUIPAY_BANK_CODES else ""
+
+
+def yuipay_withdraw_status(api_key: str, merchant_code: str, secret: str, ref_id: str,
+                           base_url: str = DEFAULT_API_URL, timeout: int = 20):
+    """Ambil status withdraw terbaru: GET /merchant/withdraw/{ref_id}."""
+    return get_json(api_key, merchant_code, secret,
+                    f"/merchant/withdraw/{quote(str(ref_id), safe='')}",
+                    base_url=base_url, timeout=timeout)

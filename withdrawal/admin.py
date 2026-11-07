@@ -16,7 +16,7 @@ from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign
 from deposits.integrations.reepay import post_json as reepay_post_json
 from deposits.integrations.yuipay import post_json as yuipay_post_json
 from .integrations.ffpay import FFPAY_POPULAR_BANKS, ffpay_payout_bank_code
-from .integrations.yuipay import YUIPAY_BANK_CODES, yuipay_bank_code
+from .integrations.yuipay import YUIPAY_BANK_CODES, yuipay_bank_code, yuipay_withdraw_status
 from .views import (
     FFPAY_PAYOUT_WALLETS,
     YUIPAY_PAYOUT_MAX_AMOUNT,
@@ -106,6 +106,41 @@ def _redact_for_log(value):
     if isinstance(value, list):
         return [_redact_for_log(v) for v in value]
     return value
+
+
+def _sync_yuipay_withdrawal(wd, gs):
+    """Sinkronkan status 1 withdrawal dari Yuipay (pengganti callback yang tidak datang).
+
+    Return (provider_status, berubah). provider_status '' = belum punya ref_id.
+    """
+    trace = getattr(wd, 'yuipay_withdrawal', None)
+    stored = trace.response_payload if trace and isinstance(trace.response_payload, dict) else {}
+    ref_id = ((stored.get('initiate') or {}).get('data') or {}).get('ref_id') or ''
+    if not ref_id:
+        return '', False
+
+    resp, _ = yuipay_withdraw_status(
+        (getattr(gs, 'yuipay_payout_api_key', '') or '').strip(),
+        (getattr(gs, 'yuipay_payout_merchant_code', '') or '').strip(),
+        (getattr(gs, 'yuipay_payout_secret_key', '') or '').strip(),
+        ref_id,
+        base_url=(getattr(gs, 'yuipay_payout_api_url', '') or '').strip(),
+    )
+    data = resp.get('data') if isinstance(resp.get('data'), dict) else {}
+    provider_status = str(data.get('status') or '').strip().lower()
+
+    if trace:
+        stored['status_check'] = _redact_for_log(resp)
+        trace.response_payload = stored
+        trace.save(update_fields=['response_payload'])
+
+    mapping = {'success': 'COMPLETED', 'completed': 'COMPLETED', 'failed': 'REJECTED', 'rejected': 'REJECTED'}
+    new_status = mapping.get(provider_status)
+    if new_status and new_status != wd.status:
+        wd.status = new_status
+        wd.save()
+        return provider_status, True
+    return provider_status, False
 
 
 PPAYPROS_PAYOUT_CODE_SET = {item["code"] for item in PPAYPROS_PAYOUT_CODES if item.get("code")}
@@ -1688,6 +1723,27 @@ class WithdrawalAdmin(admin.ModelAdmin):
         if processed:
             self.message_user(request, f"Berhasil memproses {processed} withdrawal via Yuipay.", level=messages.SUCCESS)
     process_withdrawal_yuipay.short_description = 'Process via Yuipay'
+
+    def sync_yuipay_status(self, request, queryset):
+        gs = WithdrawalSettings.objects.order_by('-updated_at').first()
+        if not gs or not (gs.yuipay_payout_api_url or '').strip() or not (gs.yuipay_payout_api_key or '').strip() \
+                or not (gs.yuipay_payout_merchant_code or '').strip() or not (gs.yuipay_payout_secret_key or '').strip():
+            self.message_user(request, 'Konfigurasi Yuipay payout belum lengkap', level=messages.ERROR)
+            return
+
+        for wd in queryset.select_related('transaction'):
+            try:
+                provider_status, changed = _sync_yuipay_withdrawal(wd, gs)
+            except Exception as e:
+                self.message_user(request, f"Withdrawal #{wd.id} gagal cek status: {e}", level=messages.ERROR)
+                continue
+            if not provider_status:
+                self.message_user(request, f"Withdrawal #{wd.id} dilewati: belum punya ref_id Yuipay", level=messages.WARNING)
+            elif changed:
+                self.message_user(request, f"Withdrawal #{wd.id} -> {wd.status} (Yuipay: {provider_status})", level=messages.SUCCESS)
+            else:
+                self.message_user(request, f"Withdrawal #{wd.id} tetap {wd.status} (Yuipay: {provider_status})", level=messages.INFO)
+    sync_yuipay_status.short_description = 'Sync status Yuipay'
 
 
 @admin.register(WithdrawalJayapay)
