@@ -16,8 +16,13 @@ from deposits.integrations.bankpay import generate_sign as bankpay_generate_sign
 from deposits.integrations.reepay import post_json as reepay_post_json
 from deposits.integrations.yuipay import post_json as yuipay_post_json
 from .integrations.ffpay import FFPAY_POPULAR_BANKS, ffpay_payout_bank_code
-from .integrations.yuipay import yuipay_bank_code
-from .views import FFPAY_PAYOUT_WALLETS, _resolve_app_domain
+from .integrations.yuipay import YUIPAY_BANK_CODES, yuipay_bank_code
+from .views import (
+    FFPAY_PAYOUT_WALLETS,
+    YUIPAY_PAYOUT_MAX_AMOUNT,
+    YUIPAY_PAYOUT_MIN_AMOUNT,
+    _resolve_app_domain,
+)
 from django.utils.html import format_html
 import json
 import logging
@@ -1358,6 +1363,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
                     'account_holder_name': obj.bank_account.account_name if obj.bank_account else '',
                     'amount': str(obj.net_amount or obj.amount),
                 },
+                'yuipay_bank_codes': [{'code': c, 'name': n} for c, n in YUIPAY_BANK_CODES.items()],
                 'process_yuipay_url': reverse('admin:withdrawal_withdrawal_process_yuipay', args=(obj.id,)),
                 'ffpay_payout_enabled': any(bool(gs and getattr(gs, cfg["flag"], False)) for cfg in FFPAY_PAYOUT_WALLETS.values()),
                 'ffpay_wallets': [

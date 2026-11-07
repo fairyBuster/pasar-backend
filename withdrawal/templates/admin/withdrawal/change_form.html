@@ -475,8 +475,13 @@
           <div class="form-row">
             <div>
               <label for="id_yp_bank_code">Bank Code</label>
-              <input type="text" id="id_yp_bank_code" name="bank_code" value="{{ yuipay_payout_initial.bank_code }}" required />
-              <p style="margin: 4px 0 0; color: #666;">Kode numerik Yuipay: 014 BCA, 009 BNI, 002 BRI, 008 Mandiri, 022 CIMB, 013 Permata, 011 Danamon, 4510 BSI, 200 BTN, 10003 GoPay, 10002 DANA, 10001 OVO, 10008 ShopeePay, 10009 LinkAja.</p>
+              <select id="id_yp_bank_code" name="bank_code" required>
+                {% for b in yuipay_bank_codes %}
+                  <option value="{{ b.code }}" {% if yuipay_payout_initial.bank_code == b.code %}selected{% endif %}>
+                    {{ b.code }} - {{ b.name }}
+                  </option>
+                {% endfor %}
+              </select>
             </div>
           </div>
 

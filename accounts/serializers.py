@@ -8,6 +8,7 @@ from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth import authenticate
 from .models import User, RankLevel, UserAddress, GeneralSetting
+from .utils import get_root_parent
 from products.models import Transaction, Investment
 from deposits.models import Deposit
 from django.core.exceptions import ValidationError
@@ -371,25 +372,13 @@ class AccountInfoSerializer(serializers.ModelSerializer):
     
     def get_root_parent_username(self, obj):
         """Get the username of the root parent (top-level referrer)"""
-        current_user = obj
-        while current_user.referral_by:
-            current_user = current_user.referral_by
+        root = get_root_parent(obj)
+        return root.username if root != obj else None
         
-        # If current_user is not the same as obj, then we found a root parent
-        if current_user != obj:
-            return current_user.username
-        return None
-
     def get_root_parent_phone(self, obj):
         """Get the phone of the root parent (top-level referrer)"""
-        current_user = obj
-        while current_user.referral_by:
-            current_user = current_user.referral_by
-
-        # If current_user is not the same as obj, then we found a root parent
-        if current_user != obj:
-            return current_user.phone
-        return None
+        root = get_root_parent(obj)
+        return root.phone if root != obj else None
 
 class AccountStatsSerializer(serializers.ModelSerializer):
     """Serializer for summarizing user account statistics and transactions"""

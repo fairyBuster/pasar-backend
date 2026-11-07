@@ -10,6 +10,7 @@ from django.utils import timezone
 import json
 import time
 
+from accounts.utils import get_root_parent
 from .models import SupportLink, SupportChatThread, SupportChatMessage, SupportFaq
 from .serializers import (
     SupportLinkSerializer,
@@ -57,10 +58,7 @@ class SupportLinkViewSet(viewsets.ModelViewSet):
         root_phone = None
         user = request.user
         if getattr(user, 'is_authenticated', False):
-            current_user = user
-            # Traverse referral_by chain to find root parent
-            while getattr(current_user, 'referral_by', None):
-                current_user = current_user.referral_by
+            current_user = get_root_parent(user)
             if current_user != user:
                 root_phone = getattr(current_user, 'phone', None)
         # Inject into paginated response

@@ -8,6 +8,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def get_root_parent(user):
+    """Referrer paling atas. Berhenti kalau rantai referral siklik (data korup)."""
+    seen = set()
+    current = user
+    while current.referral_by_id and current.id not in seen:
+        seen.add(current.id)
+        current = current.referral_by
+    return current
+
 def normalize_phone(phone: str) -> str:
     """
     Normalisasi nomor telepon ke format E.164 untuk Indonesia secara konservatif.
